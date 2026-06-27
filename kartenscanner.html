@@ -1,0 +1,1116 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kartenkammer</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap');
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0E0D0B;
+    color: #EDE7D9;
+    font-family: 'Inter', system-ui, sans-serif;
+    min-height: 100vh;
+  }
+  .font-display { font-family: 'Space Grotesk', sans-serif; }
+  button { font-family: inherit; cursor: pointer; }
+  input, select, textarea { font-family: inherit; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #3A362C; border-radius: 4px; }
+  .focus-ring:focus-visible { outline: 2px solid #C9A24B; outline-offset: 2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spin { animation: spin 1s linear infinite; }
+  @keyframes slideUp {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .slide-up { animation: slideUp 0.3s ease-out; }
+  .hidden { display: none !important; }
+
+  header { border-bottom: 1px solid #262219; padding: 20px 20px 16px; }
+  .header-title-row { display: flex; align-items: baseline; gap: 10px; }
+  .header-title-row h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+  .header-count { font-size: 12px; color: #8A8270; font-weight: 500; }
+  nav { display: flex; gap: 4px; margin-top: 14px; }
+  .tab-btn {
+    padding: 8px 16px; border-radius: 8px; border: none; font-size: 13px; font-weight: 600;
+    background: transparent; color: #A89F8A; transition: all 0.15s;
+  }
+  .tab-btn.active { background: #C9A24B; color: #1A1710; }
+
+  main { padding: 20px; max-width: 560px; margin: 0 auto; }
+  main.wide { max-width: 720px; }
+
+  .section-label {
+    font-size: 11px; font-weight: 600; color: #8A8270; margin-bottom: 8px;
+    text-transform: uppercase; letter-spacing: 0.03em;
+  }
+  .mode-row { display: flex; gap: 6px; }
+  .mode-btn {
+    flex: 1; padding: 9px 8px; border-radius: 8px; border: 1.5px solid #262219;
+    background: transparent; color: #8A8270; font-size: 12px; font-weight: 600;
+  }
+  .mode-btn.active { border: 1.5px solid #C9A24B; background: #C9A24B22; color: #C9A24B; }
+  .source-note { font-size: 10px; color: #6B6452; margin-top: 8px; line-height: 1.4; }
+
+  .btn-primary {
+    background: #C9A24B; color: #1A1710; border: none; border-radius: 10px;
+    padding: 12px 16px; font-size: 13px; font-weight: 700; display: flex;
+    align-items: center; justify-content: center; gap: 7px;
+  }
+  .btn-secondary {
+    background: transparent; color: #A89F8A; border: 1px solid #2A2618; border-radius: 10px;
+    padding: 12px 16px; font-size: 13px; font-weight: 600; display: flex;
+    align-items: center; justify-content: center; gap: 7px;
+  }
+  .btn-save-all {
+    background: #1A3324; color: #6FCF8F; border: 1px solid #2A4A36; border-radius: 8px;
+    padding: 7px 14px; font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 6px;
+  }
+  .btn-icon {
+    background: transparent; border: none; color: #6B6452; padding: 6px; border-radius: 6px;
+    display: flex; align-items: center;
+  }
+  .input-field {
+    width: 100%; background: #1A1710; border: 1px solid #2A2618; border-radius: 8px;
+    padding: 9px 12px; font-size: 13px; color: #EDE7D9;
+  }
+  .form-field { margin-bottom: 10px; }
+  .form-field label {
+    display: block; font-size: 10px; font-weight: 600; color: #8A8270; margin-bottom: 5px;
+    text-transform: uppercase; letter-spacing: 0.03em;
+  }
+  .form-row { display: flex; gap: 10px; }
+  .form-row > div { flex: 1; }
+
+  .empty-box {
+    border: 1.5px dashed #3A362C; border-radius: 16px; padding: 40px 24px; text-align: center;
+    background: #16140F;
+  }
+  .empty-box p { font-size: 13px; color: #8A8270; line-height: 1.5; margin-top: 12px; }
+
+  .queue-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .queue-header span { font-size: 13px; font-weight: 600; color: #A89F8A; }
+  .queue-list { display: flex; flex-direction: column; gap: 8px; }
+
+  .queue-row {
+    display: flex; align-items: center; gap: 10px; background: #16140F; border-radius: 12px;
+    padding: 10px 12px; border-left: 3px solid #6B6452;
+  }
+  .queue-row img { width: 38px; height: 52px; object-fit: cover; border-radius: 5px; flex-shrink: 0; }
+  .queue-row .info { flex: 1; min-width: 0; }
+  .queue-row .name-row { display: flex; align-items: baseline; gap: 6px; }
+  .queue-row .name { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .queue-row .foil-tag { font-size: 10px; font-weight: 700; color: #C9A24B; }
+  .queue-row .meta { font-size: 12px; color: #8A8270; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .queue-row .analyzing { display: flex; align-items: center; gap: 7px; font-size: 13px; color: #8A8270; }
+  .queue-row .error-text { font-size: 13px; color: #D4824C; }
+
+  .candidate-box { background: #16140F; border-radius: 12px; padding: 14px; border: 1px solid #2A2618; }
+  .candidate-header { display: flex; gap: 10px; margin-bottom: 10px; }
+  .candidate-header img { width: 44px; height: 60px; object-fit: cover; border-radius: 6px; flex-shrink: 0; }
+  .candidate-header .title { font-size: 13px; font-weight: 600; color: #EDE7D9; }
+  .candidate-header .subtitle { font-size: 11px; color: #8A8270; margin-top: 2px; }
+  .candidate-scroll { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+  .candidate-card {
+    flex-shrink: 0; width: 92px; background: transparent; border: 1px solid #2A2618; border-radius: 8px;
+    padding: 4px; cursor: pointer; text-align: left;
+  }
+  .candidate-card.selected { border: 2px solid #C9A24B; }
+  .candidate-card img { width: 100%; height: 110px; object-fit: cover; border-radius: 5px; display: block; }
+  .candidate-card .placeholder { width: 100%; height: 110px; border-radius: 5px; background: #1F1B12; }
+  .candidate-card .tag { font-size: 10px; color: #C9A24B; font-weight: 700; margin-top: 4px; }
+  .candidate-card .cname {
+    font-size: 10px; color: #A89F8A; line-height: 1.3; margin-top: 1px; overflow: hidden;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  }
+  .candidate-card .cnum { font-size: 9px; color: #6B6452; margin-top: 1px; }
+
+  .edit-box { background: #16140F; border-radius: 12px; padding: 14px; border: 1px solid #262219; }
+  .edit-header { display: flex; gap: 10px; margin-bottom: 8px; }
+  .edit-header img { width: 50px; height: 68px; object-fit: cover; border-radius: 6px; flex-shrink: 0; }
+  .game-chip-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .game-chip {
+    padding: 5px 10px; border-radius: 7px; border: 1px solid #262219; background: transparent;
+    color: #8A8270; font-size: 11px; font-weight: 600;
+  }
+  .game-chip.active { border-color: currentColor; }
+  .foil-checkbox-row { display: flex; align-items: center; gap: 10px; padding: 6px 0 10px; cursor: pointer; }
+  .foil-checkbox-row input { width: 16px; height: 16px; accent-color: #C9A24B; }
+
+  .live-video-wrap { position: relative; border-radius: 14px; overflow: hidden; background: #000; margin-bottom: 8px; }
+  .live-video-wrap video { width: 100%; display: block; aspect-ratio: 4 / 3; object-fit: cover; }
+  .live-status-bar { position: absolute; top: 10px; left: 10px; right: 10px; display: flex; justify-content: space-between; align-items: center; }
+  .live-status-pill {
+    background: rgba(0,0,0,0.55); color: #EDE7D9; font-size: 11px; font-weight: 600; padding: 5px 10px;
+    border-radius: 20px; display: flex; align-items: center; gap: 6px;
+  }
+  .live-status-pill.capturing { color: #C9A24B; }
+  .live-frame-guide {
+    position: absolute; top: 12%; left: 15%; right: 15%; bottom: 12%;
+    border: 2px dashed rgba(201,162,75,0.6); border-radius: 12px; pointer-events: none;
+  }
+
+  .error-banner {
+    display: flex; gap: 8px; background: #241A14; border: 1px solid #4A2E1E; border-radius: 10px;
+    padding: 10px; margin-bottom: 14px; font-size: 12px; color: #D4B49A; line-height: 1.4;
+  }
+  .toast-banner {
+    position: fixed; bottom: 16px; left: 16px; right: 16px; background: #241A14; border: 1px solid #4A2E1E;
+    border-radius: 10px; padding: 12px; display: flex; gap: 10px; align-items: flex-start; max-width: 560px;
+    margin: 0 auto; font-size: 12px; color: #D4B49A; line-height: 1.4;
+  }
+
+  .filter-chips { display: flex; gap: 6px; margin-bottom: 18px; overflow-x: auto; padding-bottom: 4px; }
+  .filter-chip {
+    flex-shrink: 0; padding: 6px 14px; border-radius: 20px; border: 1.5px solid #262219;
+    background: transparent; color: #8A8270; font-size: 12px; font-weight: 600; white-space: nowrap;
+  }
+  .filter-chip.active { border-color: currentColor; background-color: color-mix(in srgb, currentColor 13%, transparent); }
+
+  .search-wrap { position: relative; flex: 1; margin-bottom: 14px; }
+  .search-wrap input { padding-left: 34px; }
+  .search-icon { position: absolute; left: 12px; top: 11px; }
+
+  .empty-collection { text-align: center; padding: 60px 20px; color: #6B6452; }
+  .empty-collection p { font-size: 14px; margin-top: 12px; }
+
+  .game-group { margin-bottom: 28px; }
+  .game-group-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .game-group-dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+  .game-group-header h2 { font-size: 15px; font-weight: 700; }
+  .game-group-header .count { font-size: 12px; color: #6B6452; font-weight: 500; }
+  .game-group-header .rule { flex: 1; height: 1px; background: #262219; }
+
+  .card-row {
+    display: flex; align-items: center; gap: 12px; background: #16140F; border-radius: 12px;
+    padding: 12px 14px; border-left: 3px solid #6B6452;
+  }
+  .card-row img, .card-row .img-placeholder { width: 38px; height: 52px; border-radius: 5px; flex-shrink: 0; object-fit: cover; }
+  .card-row .img-placeholder { background: #1F1B12; }
+  .card-row .qty { font-size: 13px; font-weight: 700; flex-shrink: 0; }
+
+  .api-key-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: flex; align-items: center;
+    justify-content: center; padding: 20px; z-index: 1000;
+  }
+  .api-key-box {
+    background: #16140F; border: 1px solid #262219; border-radius: 16px; padding: 24px; max-width: 420px;
+    width: 100%;
+  }
+  .api-key-box h2 { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
+  .api-key-box p { font-size: 13px; color: #8A8270; line-height: 1.5; margin-bottom: 16px; }
+  .api-key-box a { color: #C9A24B; }
+
+  .stat-grid { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 24px; }
+  .stat-box { flex: 1 1 80px; background: #16140F; border-radius: 10px; padding: 10px 12px; border-left: 3px solid #6B6452; }
+  .stat-box .label { font-size: 11px; color: #8A8270; font-weight: 600; }
+  .stat-box .value { font-size: 18px; font-weight: 700; }
+
+  details > summary { font-size: 11px; color: #6B6452; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<div id="api-key-overlay" class="api-key-overlay hidden">
+  <div class="api-key-box">
+    <h2 class="font-display">Anthropic API-Key</h2>
+    <p>
+      Diese App läuft außerhalb von Claude und braucht deinen eigenen Anthropic API-Key für die Karten-Erkennung.
+      Er wird ausschließlich lokal in deinem Browser gespeichert (localStorage), niemals an einen Server außer Anthropic selbst gesendet.
+      Key bekommst du unter <a href="https://console.anthropic.com" target="_blank" rel="noopener">console.anthropic.com</a>.
+    </p>
+    <input type="password" id="api-key-input" class="input-field" placeholder="sk-ant-..." style="margin-bottom: 12px;">
+    <button id="api-key-save" type="button" class="btn-primary focus-ring" style="width: 100%;">Speichern &amp; starten</button>
+  </div>
+</div>
+
+<header>
+  <div class="header-title-row">
+    <h1 class="font-display">Kartenkammer</h1>
+    <span class="header-count" id="header-count">0 Karten</span>
+  </div>
+  <nav>
+    <button type="button" class="tab-btn focus-ring active" data-tab="scan" id="tab-scan">Scannen</button>
+    <button type="button" class="tab-btn focus-ring" data-tab="collection" id="tab-collection">Bestand</button>
+  </nav>
+</header>
+
+<main id="view-scan">
+  <div style="margin-bottom: 16px;">
+    <div class="section-label">Scan-Modus</div>
+    <div class="mode-row" id="foil-mode-row">
+      <button type="button" class="mode-btn focus-ring active" data-mode="either">Beide</button>
+      <button type="button" class="mode-btn focus-ring" data-mode="foilOnly">Nur Foil</button>
+      <button type="button" class="mode-btn focus-ring" data-mode="nonFoilOnly">Nur Non-Foil</button>
+    </div>
+    <div class="section-label" style="margin-top: 14px;">Filter (bleiben an, bis du sie selbst ausschaltest)</div>
+    <div class="mode-row" id="special-filter-row">
+      <button type="button" class="mode-btn focus-ring" data-filter="overnumber">Overnumber</button>
+      <button type="button" class="mode-btn focus-ring" data-filter="altArt">Alt Art</button>
+      <button type="button" class="mode-btn focus-ring" data-filter="promo">Promo</button>
+    </div>
+    <p class="source-note">Riftbound-Kartenbilder und Daten kommen live von Riftcodex.com — einem inoffiziellen Fan-Projekt, nicht von Riot Games selbst. Bitte trotzdem kurz prüfen.</p>
+  </div>
+
+  <button type="button" id="live-scan-start-btn" class="btn-primary focus-ring" style="width: 100%; padding: 14px 16px; font-size: 14px; margin-bottom: 10px;">
+    📷 Live-Scan starten
+  </button>
+
+  <div id="live-video-section" class="hidden" style="margin-bottom: 10px;">
+    <div class="live-video-wrap">
+      <video id="live-video" playsinline muted autoplay></video>
+      <div class="live-status-bar">
+        <span class="live-status-pill" id="live-status-pill">Karte ruhig vor die Kamera halten</span>
+      </div>
+      <div class="live-frame-guide"></div>
+    </div>
+    <button type="button" id="live-scan-stop-btn" class="btn-secondary focus-ring" style="width: 100%;">✕ Live-Scan beenden</button>
+  </div>
+  <canvas id="live-canvas" class="hidden"></canvas>
+
+  <div id="live-error-banner" class="error-banner hidden"></div>
+
+  <div id="fallback-photo-section" class="hidden" style="margin-bottom: 18px;">
+    <div class="section-label">Foto aufnehmen</div>
+    <div style="display: flex; gap: 8px;">
+      <button type="button" id="camera-capture-btn-prominent" class="btn-primary focus-ring" style="flex: 1;">📷 Foto aufnehmen</button>
+      <button type="button" id="gallery-btn-prominent" class="btn-secondary focus-ring" style="flex: 1;">⬆ Aus Galerie</button>
+    </div>
+  </div>
+
+  <details id="fallback-photo-details" style="margin-bottom: 18px;">
+    <summary>Live-Scan funktioniert nicht? Foto oder Galerie nutzen</summary>
+    <div style="display: flex; gap: 8px; margin-top: 10px;">
+      <button type="button" id="camera-capture-btn" class="btn-secondary focus-ring" style="flex: 1;">📷 Foto aufnehmen</button>
+      <button type="button" id="gallery-btn" class="btn-secondary focus-ring" style="flex: 1;">⬆ Aus Galerie</button>
+    </div>
+    <input type="file" id="gallery-input-visible" accept="image/*" multiple style="width: 100%; font-size: 12px; color: #8A8270; padding: 8px 0;">
+  </details>
+
+  <input type="file" id="camera-input" accept="image/*" capture="environment" class="hidden">
+  <input type="file" id="gallery-input" accept="image/*" multiple class="hidden">
+
+  <div id="queue-empty" class="empty-box slide-up">
+    <p>Fotografier deinen Stapel Karte für Karte. Jede landet hier in der Warteschlange — am Ende prüfst du alle zusammen und speicherst auf einmal.</p>
+  </div>
+
+  <div id="queue-section" class="slide-up hidden">
+    <div class="queue-header">
+      <span id="queue-header-text">0 Karten im Stapel</span>
+      <button type="button" id="save-all-btn" class="btn-save-all focus-ring hidden">✓✓ <span id="save-all-count">0</span> speichern</button>
+    </div>
+    <div class="queue-list" id="queue-list"></div>
+  </div>
+
+  <div class="stat-grid hidden" id="stat-grid"></div>
+</main>
+
+<main id="view-collection" class="wide hidden">
+  <div style="display: flex; gap: 8px;">
+    <div class="search-wrap">
+      <span class="search-icon">🔍</span>
+      <input type="text" id="search-input" class="input-field focus-ring" placeholder="Name, Set oder Nummer suchen">
+    </div>
+  </div>
+  <div class="filter-chips" id="filter-chips"></div>
+  <div id="collection-content"></div>
+</main>
+
+<div id="toast-container"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var GAMES = {
+    riftbound: { label: "Riftbound", color: "#C9A24B", short: "RB" },
+    onepiece: { label: "One Piece", color: "#D44C2C", short: "OP" },
+    pokemon: { label: "Pokémon", color: "#2E6F40", short: "PKM" },
+    mtg: { label: "Magic", color: "#3A3A6E", short: "MTG" }
+  };
+  var CONDITIONS = ["Mint", "Near Mint", "Excellent", "Good", "Light Played", "Played", "Poor"];
+  var LANGUAGES = ["DE", "EN", "JP", "FR", "IT", "ES", "PT", "KR", "CN"];
+  var RIFTCODEX_BASE = "https://api.riftcodex.com";
+  var STORAGE_KEY_CARDS = "kartenkammer_cards";
+  var STORAGE_KEY_FOILMODE = "kartenkammer_foilmode";
+  var STORAGE_KEY_SPECIALFILTERS = "kartenkammer_special_filters";
+  var STORAGE_KEY_APIKEY = "kartenkammer_api_key";
+
+  var cards = [];
+  var queue = [];
+  var foilMode = "either";
+  var specialFilters = { overnumber: false, altArt: false, promo: false };
+  var view = "scan";
+  var filterGame = "all";
+  var searchTerm = "";
+  var editingQueueId = null;
+  var editingCardId = null;
+  var apiKey = "";
+
+  var liveActive = false;
+  var liveStream = null;
+  var liveInterval = null;
+  var liveBusy = false;
+  var liveCameraBlocked = false;
+
+  function uid() {
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  }
+
+  function escapeHtml(str) {
+    var div = document.createElement("div");
+    div.textContent = str == null ? "" : String(str);
+    return div.innerHTML;
+  }
+
+  function loadState() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY_CARDS);
+      if (raw) cards = JSON.parse(raw);
+    } catch (e) {}
+    try {
+      var mode = localStorage.getItem(STORAGE_KEY_FOILMODE);
+      if (mode) foilMode = mode;
+    } catch (e) {}
+    try {
+      var rawFilters = localStorage.getItem(STORAGE_KEY_SPECIALFILTERS);
+      if (rawFilters) {
+        var parsed = JSON.parse(rawFilters);
+        specialFilters.overnumber = !!parsed.overnumber;
+        specialFilters.altArt = !!parsed.altArt;
+        specialFilters.promo = !!parsed.promo;
+      }
+    } catch (e) {}
+    try {
+      apiKey = localStorage.getItem(STORAGE_KEY_APIKEY) || "";
+    } catch (e) {}
+  }
+
+  function saveSpecialFilters() {
+    try { localStorage.setItem(STORAGE_KEY_SPECIALFILTERS, JSON.stringify(specialFilters)); } catch (e) {}
+  }
+
+  function saveCards() {
+    try {
+      localStorage.setItem(STORAGE_KEY_CARDS, JSON.stringify(cards));
+    } catch (e) {
+      showToast("Speichern fehlgeschlagen. Deine letzten Änderungen wurden eventuell nicht gesichert.");
+    }
+  }
+
+  function saveFoilMode() {
+    try { localStorage.setItem(STORAGE_KEY_FOILMODE, foilMode); } catch (e) {}
+  }
+
+  function showToast(msg) {
+    var container = document.getElementById("toast-container");
+    var el = document.createElement("div");
+    el.className = "toast-banner";
+    el.innerHTML = '<span style="flex:1;">' + escapeHtml(msg) + '</span><button type="button" class="btn-icon focus-ring" style="flex-shrink:0;">✕</button>';
+    el.querySelector("button").onclick = function () { el.remove(); };
+    container.appendChild(el);
+    setTimeout(function () { el.remove(); }, 8000);
+  }
+
+  function fileToBase64(file) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onload = function () { resolve(r.result.split(",")[1]); };
+      r.onerror = reject;
+      r.readAsDataURL(file);
+    });
+  }
+
+  function identifyCard(base64, mediaType) {
+    var prompt = "Du bist ein Experte für Trading Card Games: Riftbound (League of Legends TCG), One Piece TCG, Pokémon TCG und Magic: The Gathering.\n\n" +
+      "Analysiere das Foto einer einzelnen Karte. Diese Karten werden für ein Geschäft erfasst, wo falsche Werteinschätzungen echtes Geld kosten können (z.B. eine normale Karte vs. eine seltene Signature/Alt-Art-Variante derselben Nummer mit einem kleinen Stern * dahinter kann einen Preisunterschied von wenigen Cent zu mehreren hundert Euro bedeuten). Sei deshalb ehrlich unsicher bei Details, die du nicht klar und zweifelsfrei auf dem Foto erkennen kannst - rate NICHT, wenn ein Detail unscharf, verdeckt, zu klein oder durch Reflexion/Licht nicht eindeutig lesbar ist.\n\n" +
+      "Antworte AUSSCHLIESSLICH mit einem JSON-Objekt, keine Erklärung, kein Markdown, keine Backticks. Format exakt so:\n" +
+      "{\n" +
+      '  "game": "riftbound" | "onepiece" | "pokemon" | "mtg" | "unknown",\n' +
+      '  "name": "Kartenname",\n' +
+      '  "set": "Set-Name oder Set-Kürzel",\n' +
+      '  "number": "Sammlernummer so wie auf der Karte gedruckt, inkl. eventuellem Stern* oder anderen Sonderzeichen direkt hinter der Nummer - z.B. 045/298 oder 228*/219",\n' +
+      '  "rarity": "Seltenheit falls klar erkennbar, sonst leer",\n' +
+      '  "foil": true | false,\n' +
+      '  "language": "DE" | "EN" | "JP" | "FR" | "IT" | "ES" | "PT" | "KR" | "CN" | "",\n' +
+      '  "confidence": "high" | "medium" | "low",\n' +
+      '  "uncertain_fields": ["Liste der Felder, bei denen du nicht sicher bist, z.B. \\"number\\", \\"foil\\", \\"language\\", \\"rarity\\" - leeres Array wenn alles klar erkennbar war"],\n' +
+      '  "notes": "Kurzer Hinweis WARUM ein Feld unsicher ist, falls uncertain_fields nicht leer ist, sonst leer"\n' +
+      "}\n\n" +
+      "Wenn du das Spiel nicht zuordnen kannst, setze \"game\" auf \"unknown\". Wenn ein Feld nicht erkennbar ist, lasse es leer und trage es trotzdem in uncertain_fields ein. " +
+      "Besonders wichtig: Prüfe genau, ob direkt hinter der Sammlernummer ein kleiner Stern (*) oder ein anderes Sonderzeichen steht - das markiert oft eine wertvollere Variante (Signature/Secret Rare/Alt Art) derselben Nummer. Wenn du dir bei diesem Detail nicht zu 100% sicher bist, weil es zu klein, unscharf oder durch Glanz/Reflexion überdeckt ist, trage \"number\" in uncertain_fields ein, auch wenn der Rest der Nummer klar lesbar war.";
+
+    return fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true"
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 1000,
+        messages: [{
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
+            { type: "text", text: prompt }
+          ]
+        }]
+      })
+    }).then(function (response) {
+      if (!response.ok) {
+        return response.text().then(function (errText) {
+          throw new Error("Anthropic API Fehler (" + response.status + "): " + errText.slice(0, 200));
+        });
+      }
+      return response.json();
+    }).then(function (data) {
+      var textBlock = (data.content || []).filter(function (c) { return c.type === "text"; })[0];
+      if (!textBlock) throw new Error("Keine Antwort erhalten");
+      var cleaned = textBlock.text.trim();
+      var fence = String.fromCharCode(96, 96, 96);
+      if (cleaned.indexOf(fence) === 0) {
+        cleaned = cleaned.split(fence).join("").replace(/^json/i, "").trim();
+      }
+      return JSON.parse(cleaned);
+    });
+  }
+
+  function searchRiftboundCards(query) {
+    if (!query || !query.trim()) return Promise.resolve([]);
+    var url = RIFTCODEX_BASE + "/cards/name?fuzzy=" + encodeURIComponent(query.trim()) + "&size=12";
+    return fetch(url).then(function (response) {
+      if (!response.ok) throw new Error("Riftcodex-Anfrage fehlgeschlagen");
+      return response.json();
+    }).then(function (data) {
+      return (data.items || []).map(function (card) {
+        return {
+          riftcodexId: card.id,
+          name: card.name,
+          number: card.riftbound_id,
+          set: (card.set && card.set.label) || "",
+          setId: (card.set && card.set.set_id) || "",
+          type: (card.classification && card.classification.type) || "",
+          rarity: (card.classification && card.classification.rarity) || "",
+          imageUrl: (card.media && card.media.image_url) || "",
+          isPromo: !!(card.set && card.set.set_id === "OPP"),
+          isAltArt: !!(card.metadata && card.metadata.alternate_art),
+          isOvernumbered: !!(card.metadata && card.metadata.overnumbered)
+        };
+      });
+    });
+  }
+
+  function addToQueue(file) {
+    if (!file) return;
+    var previewUrl = URL.createObjectURL(file);
+    var entryId = uid();
+
+    queue.push({
+      id: entryId, status: "analyzing", previewUrl: previewUrl, cardImageUrl: "",
+      game: "unknown", name: "", set: "", number: "", rarity: "",
+      foil: foilMode === "foilOnly", language: "EN", condition: "Near Mint",
+      quantity: 1, notes: "", confidence: "medium", candidates: [], selectedCandidate: null,
+      uncertainFields: []
+    });
+    renderQueue();
+
+    fileToBase64(file).then(function (base64) {
+      var mediaType = file.type || "image/jpeg";
+      return identifyCard(base64, mediaType);
+    }).then(function (result) {
+      var foilValue = foilMode === "foilOnly" ? true : foilMode === "nonFoilOnly" ? false : !!result.foil;
+      if (foilMode !== "either" && result.confidence === "high") {
+        foilValue = !!result.foil;
+      }
+      var detectedGame = GAMES[result.game] ? result.game : "unknown";
+      var uncertainFields = Array.isArray(result.uncertain_fields) ? result.uncertain_fields : [];
+
+      var candidatesPromise = Promise.resolve([]);
+      if (detectedGame === "riftbound" && result.name) {
+        candidatesPromise = searchRiftboundCards(result.name).catch(function (e) {
+          console.error("Riftcodex-Suche fehlgeschlagen", e);
+          return [];
+        });
+      }
+
+      return candidatesPromise.then(function (candidates) {
+        // Aktive Filter (Overnumber/Alt Art/Promo) sortieren passende Kandidaten nach vorne,
+        // verstecken aber nichts - falls die KI sich beim Namen irrt, bleibt die reguläre
+        // Karte trotzdem auffindbar.
+        if (candidates.length > 1) {
+          candidates = candidates.slice().sort(function (a, b) {
+            var scoreA = 0, scoreB = 0;
+            if (specialFilters.overnumber) { scoreA += a.isOvernumbered ? 1 : 0; scoreB += b.isOvernumbered ? 1 : 0; }
+            if (specialFilters.altArt) { scoreA += a.isAltArt ? 1 : 0; scoreB += b.isAltArt ? 1 : 0; }
+            if (specialFilters.promo) { scoreA += a.isPromo ? 1 : 0; scoreB += b.isPromo ? 1 : 0; }
+            return scoreB - scoreA;
+          });
+        }
+        var hasCandidates = candidates.length > 0;
+        var bestGuess = hasCandidates ? candidates[0] : null;
+        // Wenn die Nummer/Variante unsicher ist (z.B. Sternchen nicht eindeutig lesbar),
+        // wird IMMER eine manuelle Auswahl erzwungen - selbst bei nur einem Kandidaten -
+        // weil genau dieses Detail über den Kartenwert entscheiden kann.
+        var numberUncertain = uncertainFields.indexOf("number") !== -1;
+        var forceSelection = detectedGame === "riftbound" && (hasCandidates || numberUncertain);
+        var entry = queue.filter(function (e) { return e.id === entryId; })[0];
+        if (entry) {
+          entry.status = forceSelection ? "needs_selection" : "ready";
+          entry.game = detectedGame;
+          entry.name = bestGuess ? bestGuess.name : (result.name || "");
+          entry.set = bestGuess ? bestGuess.set : (result.set || "");
+          entry.number = bestGuess ? bestGuess.number : (result.number || "");
+          entry.rarity = bestGuess ? bestGuess.rarity : (result.rarity || "");
+          entry.foil = foilValue;
+          entry.language = result.language || "EN";
+          entry.notes = result.notes || "";
+          entry.confidence = result.confidence || "medium";
+          entry.candidates = candidates;
+          entry.selectedCandidate = hasCandidates ? null : bestGuess; // bei Unsicherheit nichts vorauswählen
+          entry.cardImageUrl = (hasCandidates ? "" : (bestGuess ? bestGuess.imageUrl : ""));
+          entry.uncertainFields = uncertainFields;
+        }
+        renderQueue();
+      });
+    }).catch(function (e) {
+      console.error(e);
+      var entry = queue.filter(function (en) { return en.id === entryId; })[0];
+      if (entry) {
+        entry.status = "error";
+        entry.confidence = "low";
+        entry.errorMessage = e.message || "Unbekannter Fehler";
+      }
+      renderQueue();
+    });
+  }
+
+  function selectCandidate(entryId, candidate) {
+    var entry = queue.filter(function (e) { return e.id === entryId; })[0];
+    if (!entry) return;
+    entry.status = "ready";
+    entry.name = candidate.name;
+    entry.set = candidate.set;
+    entry.number = candidate.number;
+    entry.rarity = candidate.rarity;
+    entry.selectedCandidate = candidate;
+    entry.cardImageUrl = candidate.imageUrl;
+    renderQueue();
+  }
+
+  function removeFromQueue(id) {
+    queue = queue.filter(function (e) { return e.id !== id; });
+    if (editingQueueId === id) editingQueueId = null;
+    renderQueue();
+  }
+
+  function saveAllReady() {
+    var readyEntries = queue.filter(function (e) { return e.status === "ready" && e.name.trim(); });
+    if (readyEntries.length === 0) return;
+    var newCards = readyEntries.map(function (entry) {
+      return {
+        id: entry.id, game: entry.game, name: entry.name, set: entry.set, number: entry.number,
+        rarity: entry.rarity, foil: entry.foil, language: entry.language, condition: entry.condition,
+        quantity: entry.quantity, notes: entry.notes, previewUrl: entry.cardImageUrl || entry.previewUrl,
+        createdAt: Date.now()
+      };
+    });
+    cards = newCards.concat(cards);
+    queue = queue.filter(function (e) { return !(e.status === "ready" && e.name.trim()); });
+    saveCards();
+    renderQueue();
+    renderHeaderCount();
+  }
+
+  function deleteCard(id) {
+    cards = cards.filter(function (c) { return c.id !== id; });
+    saveCards();
+    renderCollection();
+    renderHeaderCount();
+  }
+
+  function startLiveScan() {
+    hideLiveError();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showLiveError("Dieser Browser unterstützt keinen Kamera-Zugriff über getUserMedia. Nutze stattdessen Foto/Galerie unten.");
+      return;
+    }
+    navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 960 } },
+      audio: false
+    }).then(function (stream) {
+      liveStream = stream;
+      var video = document.getElementById("live-video");
+      video.srcObject = stream;
+
+      // Wenn der Kamera-Track von außen beendet wird (z.B. Anruf kommt rein,
+      // eine andere App übernimmt die Kamera, Nutzer entzieht die Berechtigung
+      // nachträglich), merkt die App das jetzt aktiv und zeigt es klar an,
+      // statt nur ein eingefrorenes letztes Bild stehen zu lassen.
+      stream.getVideoTracks().forEach(function (track) {
+        track.onended = function () {
+          showLiveError("Die Kamera-Verbindung wurde unterbrochen (z.B. durch eine andere App oder einen Anruf). Tippe erneut auf 'Live-Scan starten', um sie wieder aufzunehmen.");
+          stopLiveScan();
+        };
+      });
+
+      return video.play();
+    }).then(function () {
+      liveActive = true;
+      document.getElementById("live-scan-start-btn").classList.add("hidden");
+      document.getElementById("live-video-section").classList.remove("hidden");
+      liveInterval = setInterval(captureLiveFrame, 2500);
+    }).catch(function (e) {
+      console.error(e);
+      var name = (e && e.name) ? e.name : "UnknownError";
+      var detail;
+      if (name === "NotAllowedError") {
+        detail = "Kamera-Zugriff wurde verweigert. Bitte erlaube den Zugriff in den Browser-Einstellungen für diese Seite und versuch es erneut.";
+        liveCameraBlocked = true;
+      } else if (name === "NotFoundError") {
+        detail = "Es wurde keine Kamera gefunden.";
+      } else if (name === "NotReadableError") {
+        detail = "Die Kamera wird gerade von einer anderen App benutzt.";
+      } else {
+        detail = "Unbekannter Fehler beim Kamera-Zugriff.";
+      }
+      showLiveError(detail + " (" + name + ")");
+      if (liveCameraBlocked) {
+        document.getElementById("live-scan-start-btn").classList.add("hidden");
+        document.getElementById("fallback-photo-section").classList.remove("hidden");
+        document.getElementById("fallback-photo-details").classList.add("hidden");
+      }
+    });
+  }
+
+  // Wenn die Seite aus dem Hintergrund zurückkommt (Tab-Wechsel, Bildschirm
+  // entsperrt), prüfen wir ob der Stream noch lebt - viele Mobil-Browser
+  // pausieren oder beenden Kamera-Streams automatisch im Hintergrund, ohne
+  // ein 'ended'-Event zu feuern. Das stellt sicher, dass "dauerhaft" auch
+  // wirklich dauerhaft gemeint ist, nicht nur "bis zum nächsten Tab-Wechsel".
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState !== "visible") return;
+    if (!liveActive || !liveStream) return;
+    var stillLive = liveStream.getVideoTracks().some(function (t) { return t.readyState === "live"; });
+    if (!stillLive) {
+      showLiveError("Die Kamera wurde im Hintergrund pausiert. Starte den Live-Scan neu, um weiterzumachen.");
+      stopLiveScan();
+      return;
+    }
+    var video = document.getElementById("live-video");
+    if (video && video.paused) {
+      video.play().catch(function () { /* nicht kritisch, nächster Capture-Versuch prüft readyState ohnehin */ });
+    }
+  });
+
+  function stopLiveScan() {
+    if (liveInterval) { clearInterval(liveInterval); liveInterval = null; }
+    if (liveStream) { liveStream.getTracks().forEach(function (t) { t.stop(); }); liveStream = null; }
+    liveActive = false;
+    document.getElementById("live-video-section").classList.add("hidden");
+    if (!liveCameraBlocked) document.getElementById("live-scan-start-btn").classList.remove("hidden");
+    setLiveStatusPill("Karte ruhig vor die Kamera halten", false);
+  }
+
+  function setLiveStatusPill(text, capturing) {
+    var pill = document.getElementById("live-status-pill");
+    pill.textContent = text;
+    pill.classList.toggle("capturing", !!capturing);
+  }
+
+  function captureLiveFrame() {
+    if (liveBusy) return;
+    var video = document.getElementById("live-video");
+    var canvas = document.getElementById("live-canvas");
+    if (!video || video.readyState < 2) return;
+
+    liveBusy = true;
+    setLiveStatusPill("Erfasse Karte …", true);
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    var ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    canvas.toBlob(function (blob) {
+      if (blob) {
+        var file = new File([blob], "live-" + Date.now() + ".jpg", { type: "image/jpeg" });
+        addToQueue(file);
+      }
+      setLiveStatusPill("Karte ruhig vor die Kamera halten", false);
+      liveBusy = false;
+    }, "image/jpeg", 0.9);
+  }
+
+  function showLiveError(msg) {
+    var el = document.getElementById("live-error-banner");
+    el.textContent = msg;
+    el.classList.remove("hidden");
+  }
+  function hideLiveError() {
+    document.getElementById("live-error-banner").classList.add("hidden");
+  }
+
+  function renderHeaderCount() {
+    var total = cards.reduce(function (sum, c) { return sum + (c.quantity || 1); }, 0);
+    document.getElementById("header-count").textContent = total + " Karten";
+  }
+
+  function gameLabel(key) { return (GAMES[key] && GAMES[key].label) || "Unbekannt"; }
+
+  function renderQueue() {
+    var analyzingCount = queue.filter(function (e) { return e.status === "analyzing"; }).length;
+    var needsSelectionCount = queue.filter(function (e) { return e.status === "needs_selection"; }).length;
+    var readyCount = queue.filter(function (e) { return e.status === "ready" && e.name.trim(); }).length;
+
+    document.getElementById("queue-empty").classList.toggle("hidden", queue.length > 0);
+    document.getElementById("queue-section").classList.toggle("hidden", queue.length === 0);
+    document.getElementById("stat-grid").classList.toggle("hidden", !(cards.length > 0 && queue.length === 0));
+
+    var headerText = queue.length + " " + (queue.length === 1 ? "Karte" : "Karten") + " im Stapel";
+    if (analyzingCount > 0) headerText += " · " + analyzingCount + " wird erkannt";
+    if (needsSelectionCount > 0) headerText += " · " + needsSelectionCount + " braucht Auswahl";
+    document.getElementById("queue-header-text").textContent = headerText;
+
+    var saveBtn = document.getElementById("save-all-btn");
+    saveBtn.classList.toggle("hidden", readyCount === 0);
+    document.getElementById("save-all-count").textContent = readyCount;
+
+    var list = document.getElementById("queue-list");
+    list.innerHTML = queue.map(renderQueueRow).join("");
+
+    queue.forEach(function (entry) {
+      var editBtn = list.querySelector('[data-edit="' + entry.id + '"]');
+      if (editBtn) editBtn.onclick = function () { editingQueueId = editingQueueId === entry.id ? null : entry.id; renderQueue(); };
+      var removeBtn = list.querySelector('[data-remove="' + entry.id + '"]');
+      if (removeBtn) removeBtn.onclick = function () { removeFromQueue(entry.id); };
+
+      if (entry.status === "needs_selection") {
+        entry.candidates.forEach(function (c) {
+          var btn = list.querySelector('[data-candidate="' + entry.id + '_' + c.riftcodexId + '"]');
+          if (btn) btn.onclick = function () { selectCandidate(entry.id, c); };
+        });
+        var noneBtn = list.querySelector('[data-none="' + entry.id + '"]');
+        if (noneBtn) noneBtn.onclick = function () { editingQueueId = entry.id; renderQueue(); };
+      }
+
+      if (editingQueueId === entry.id) {
+        bindQueueEditHandlers(entry, list);
+      }
+    });
+
+    renderStatGrid();
+  }
+
+  function renderStatGrid() {
+    var grid = document.getElementById("stat-grid");
+    if (cards.length === 0 || queue.length > 0) { grid.innerHTML = ""; return; }
+    var counts = {};
+    Object.keys(GAMES).forEach(function (g) {
+      counts[g] = cards.filter(function (c) { return c.game === g; }).reduce(function (s, c) { return s + (c.quantity || 1); }, 0);
+    });
+    grid.innerHTML = Object.keys(GAMES).map(function (key) {
+      var g = GAMES[key];
+      return '<div class="stat-box" style="border-left-color:' + g.color + '">' +
+        '<div class="label">' + escapeHtml(g.short) + '</div>' +
+        '<div class="value font-display">' + (counts[key] || 0) + '</div></div>';
+    }).join("");
+  }
+
+  function renderQueueRow(entry) {
+    var g = GAMES[entry.game] || { label: "Unbekannt", color: "#6B6452" };
+    var borderColor = entry.status === "analyzing" ? "#6B6452" : entry.status === "error" ? "#D4824C" : g.color;
+
+    if (editingQueueId === entry.id) {
+      var gameChips = Object.keys(GAMES).map(function (key) {
+        var gg = GAMES[key];
+        return '<button type="button" class="game-chip focus-ring ' + (entry.game === key ? "active" : "") + '" style="color:' + gg.color + '" data-game="' + key + '">' + escapeHtml(gg.label) + '</button>';
+      }).join("");
+      var langOptions = LANGUAGES.map(function (l) { return '<option value="' + l + '" ' + (entry.language === l ? "selected" : "") + '>' + l + '</option>'; }).join("");
+      var condOptions = CONDITIONS.map(function (c) { return '<option value="' + c + '" ' + (entry.condition === c ? "selected" : "") + '>' + escapeHtml(c) + '</option>'; }).join("");
+
+      return '<div class="edit-box" id="edit-box-' + entry.id + '">' +
+        '<div class="edit-header"><img src="' + escapeHtml(entry.previewUrl) + '" alt="">' +
+        '<div style="flex:1;"><div class="game-chip-row">' + gameChips + '</div>' +
+        '<input type="text" class="input-field focus-ring" id="edit-name-' + entry.id + '" value="' + escapeHtml(entry.name) + '" placeholder="Kartenname"></div></div>' +
+        '<div class="form-row"><div class="form-field"><label>Set</label><input type="text" class="input-field focus-ring" id="edit-set-' + entry.id + '" value="' + escapeHtml(entry.set) + '"></div>' +
+        '<div class="form-field"><label>Nummer</label><input type="text" class="input-field focus-ring" id="edit-number-' + entry.id + '" value="' + escapeHtml(entry.number) + '"></div></div>' +
+        '<div class="form-row"><div class="form-field"><label>Rarity</label><input type="text" class="input-field focus-ring" id="edit-rarity-' + entry.id + '" value="' + escapeHtml(entry.rarity) + '"></div>' +
+        '<div class="form-field"><label>Menge</label><input type="number" min="1" class="input-field focus-ring" id="edit-quantity-' + entry.id + '" value="' + entry.quantity + '"></div></div>' +
+        '<div class="form-row"><div class="form-field"><label>Sprache</label><select class="input-field focus-ring" id="edit-language-' + entry.id + '">' + langOptions + '</select></div>' +
+        '<div class="form-field"><label>Zustand</label><select class="input-field focus-ring" id="edit-condition-' + entry.id + '">' + condOptions + '</select></div></div>' +
+        '<label class="foil-checkbox-row"><input type="checkbox" id="edit-foil-' + entry.id + '" ' + (entry.foil ? "checked" : "") + '><span style="font-size:13px;">Foil</span></label>' +
+        '<button type="button" class="btn-primary focus-ring" style="width:100%;" data-edit="' + entry.id + '">Fertig</button></div>';
+    }
+
+    if (entry.status === "needs_selection") {
+      var numberUncertain = (entry.uncertainFields || []).indexOf("number") !== -1;
+      var foilUncertain = (entry.uncertainFields || []).indexOf("foil") !== -1;
+      var langUncertain = (entry.uncertainFields || []).indexOf("language") !== -1;
+
+      var warningHtml = "";
+      if (numberUncertain) {
+        warningHtml = '<div style="background:#241A14; border:1px solid #4A2E1E; border-radius:8px; padding:8px 10px; margin-bottom:10px; font-size:11px; color:#D4B49A; line-height:1.4;">' +
+          '⚠ Sammlernummer/Variante (z.B. ein Sternchen für seltenere Editionen) war auf dem Foto nicht eindeutig lesbar. Das kann den Wert stark beeinflussen — bitte die Karte direkt mit der Nummer auf dem Original vergleichen, nicht nur den Namen.</div>';
+      }
+      var subtitleExtra = [];
+      if (foilUncertain) subtitleExtra.push("Foil-Glanz unsicher");
+      if (langUncertain) subtitleExtra.push("Sprache unsicher");
+
+      var candidatesHtml = entry.candidates.map(function (c) {
+        var sel = entry.selectedCandidate && entry.selectedCandidate.riftcodexId === c.riftcodexId;
+        var img = c.imageUrl ? '<img src="' + escapeHtml(c.imageUrl) + '" alt="' + escapeHtml(c.name) + '">' : '<div class="placeholder"></div>';
+        var tag = c.isPromo ? "PROMO" : c.isAltArt ? "ALT ART" : escapeHtml(c.set);
+        return '<button type="button" class="candidate-card focus-ring ' + (sel ? "selected" : "") + '" data-candidate="' + entry.id + '_' + c.riftcodexId + '">' +
+          img + '<div class="tag">' + tag + '</div><div class="cname">' + escapeHtml(c.name) + '</div><div class="cnum">' + escapeHtml(c.number) + '</div></button>';
+      }).join("");
+
+      var subtitle = entry.candidates.length + ' Treffer gefunden — tippe die richtige an';
+      if (subtitleExtra.length) subtitle += ' (' + subtitleExtra.join(", ") + ')';
+
+      return '<div class="candidate-box"><div class="candidate-header"><img src="' + escapeHtml(entry.previewUrl) + '" alt="">' +
+        '<div><div class="title">Welche Karte ist das?</div><div class="subtitle">' + subtitle + '</div></div></div>' +
+        warningHtml +
+        '<div class="candidate-scroll">' + candidatesHtml + '</div>' +
+        '<button type="button" class="btn-secondary focus-ring" style="width:100%; margin-top:10px; padding:8px 12px; font-size:12px;" data-none="' + entry.id + '">Keine davon — manuell eintragen</button></div>';
+    }
+
+    var bodyHtml;
+    if (entry.status === "analyzing") {
+      bodyHtml = '<div class="analyzing"><span class="spin" style="display:inline-block;">⏳</span> Wird erkannt …</div>';
+    } else if (entry.status === "error") {
+      bodyHtml = '<span class="error-text">Erkennung fehlgeschlagen — tippe zum Eintragen</span>';
+    } else {
+      var metaParts = [gameLabel(entry.game), entry.set, entry.number].filter(Boolean).map(escapeHtml).join(" · ");
+      var uf = entry.uncertainFields || [];
+      bodyHtml = '<div class="name-row"><span class="name">' + (escapeHtml(entry.name) || "Unbenannt — bitte prüfen") + '</span>' +
+        (entry.foil ? '<span class="foil-tag">FOIL</span>' : "") + '</div>' +
+        '<div class="meta">' + (metaParts || "Spiel nicht erkannt") + '</div>' +
+        ((entry.game === "riftbound" && entry.selectedCandidate && entry.selectedCandidate.isPromo) ? '<div style="font-size:11px;color:#C9A24B;margin-top:2px;">Promo-Karte (Set OPP)</div>' : "") +
+        (uf.length > 0 ? '<div style="font-size:11px;color:#D4824C;margin-top:2px;">⚠ Unsicher bei: ' + uf.map(escapeHtml).join(", ") + ' — bitte prüfen</div>' : "");
+    }
+
+    return '<div class="queue-row" style="border-left-color:' + borderColor + '">' +
+      '<img src="' + escapeHtml(entry.cardImageUrl || entry.previewUrl) + '" alt="" style="opacity:' + (entry.status === "analyzing" ? 0.5 : 1) + '">' +
+      '<div class="info">' + bodyHtml + '</div>' +
+      '<button type="button" class="btn-icon focus-ring" data-edit="' + entry.id + '"' + (entry.status === "analyzing" ? ' disabled style="opacity:0.3"' : '') + '>✎</button>' +
+      '<button type="button" class="btn-icon focus-ring" data-remove="' + entry.id + '">🗑</button></div>';
+  }
+
+  function bindQueueEditHandlers(entry, container) {
+    var box = container.querySelector("#edit-box-" + entry.id);
+    if (!box) return;
+
+    box.querySelectorAll("[data-game]").forEach(function (btn) {
+      btn.onclick = function () {
+        var e = queue.filter(function (q) { return q.id === entry.id; })[0];
+        if (e) e.game = btn.getAttribute("data-game");
+        renderQueue();
+      };
+    });
+
+    var doneBtn = box.querySelector('[data-edit="' + entry.id + '"]');
+    if (doneBtn) doneBtn.onclick = function () {
+      var name = box.querySelector("#edit-name-" + entry.id).value;
+      var set = box.querySelector("#edit-set-" + entry.id).value;
+      var number = box.querySelector("#edit-number-" + entry.id).value;
+      var rarity = box.querySelector("#edit-rarity-" + entry.id).value;
+      var quantity = Math.max(1, parseInt(box.querySelector("#edit-quantity-" + entry.id).value, 10) || 1);
+      var language = box.querySelector("#edit-language-" + entry.id).value;
+      var condition = box.querySelector("#edit-condition-" + entry.id).value;
+      var foil = box.querySelector("#edit-foil-" + entry.id).checked;
+      var e = queue.filter(function (q) { return q.id === entry.id; })[0];
+      if (e) {
+        e.name = name; e.set = set; e.number = number; e.rarity = rarity;
+        e.quantity = quantity; e.language = language; e.condition = condition; e.foil = foil;
+        e.status = "ready";
+      }
+      editingQueueId = null;
+      renderQueue();
+    };
+  }
+
+  function renderCollection() {
+    renderFilterChips();
+    var filtered = cards.filter(function (c) {
+      if (filterGame !== "all" && c.game !== filterGame) return false;
+      if (searchTerm.trim()) {
+        var t = searchTerm.toLowerCase();
+        return c.name.toLowerCase().indexOf(t) !== -1 || c.set.toLowerCase().indexOf(t) !== -1 || c.number.toLowerCase().indexOf(t) !== -1;
+      }
+      return true;
+    });
+
+    var content = document.getElementById("collection-content");
+
+    if (filtered.length === 0) {
+      content.innerHTML = '<div class="empty-collection"><p>' +
+        (cards.length === 0 ? "Noch keine Karten erfasst. Scann deine erste Karte." : "Keine Treffer für diesen Filter.") +
+        '</p></div>';
+      return;
+    }
+
+    if (filterGame !== "all") {
+      content.innerHTML = '<div class="queue-list">' + filtered.map(renderCardRow).join("") + '</div>';
+      bindCardRowHandlers(filtered);
+      return;
+    }
+
+    var html = "";
+    Object.keys(GAMES).forEach(function (key) {
+      var g = GAMES[key];
+      var groupCards = filtered.filter(function (c) { return c.game === key; });
+      if (groupCards.length === 0) return;
+      var groupTotal = groupCards.reduce(function (s, c) { return s + (c.quantity || 1); }, 0);
+      html += '<div class="game-group"><div class="game-group-header">' +
+        '<div class="game-group-dot" style="background:' + g.color + '"></div>' +
+        '<h2 class="font-display" style="color:' + g.color + '">' + escapeHtml(g.label) + '</h2>' +
+        '<span class="count">' + groupCards.length + ' ' + (groupCards.length === 1 ? "Karte" : "Karten") + ' · ' + groupTotal + ' Stück</span>' +
+        '<div class="rule"></div></div><div class="queue-list">' + groupCards.map(renderCardRow).join("") + '</div></div>';
+    });
+    var unknownCards = filtered.filter(function (c) { return !GAMES[c.game]; });
+    if (unknownCards.length > 0) {
+      html += '<div class="game-group"><div class="game-group-header">' +
+        '<div class="game-group-dot" style="background:#6B6452"></div>' +
+        '<h2 class="font-display" style="color:#6B6452">Unbekannt</h2>' +
+        '<span class="count">' + unknownCards.length + ' ' + (unknownCards.length === 1 ? "Karte" : "Karten") + '</span>' +
+        '<div class="rule"></div></div><div class="queue-list">' + unknownCards.map(renderCardRow).join("") + '</div></div>';
+    }
+    content.innerHTML = html;
+    bindCardRowHandlers(filtered.concat(unknownCards));
+  }
+
+  function renderCardRow(card) {
+    var g = GAMES[card.game] || { label: "Unbekannt", color: "#6B6452" };
+    if (editingCardId === card.id) {
+      var condOptions = CONDITIONS.map(function (c) { return '<option value="' + c + '" ' + (card.condition === c ? "selected" : "") + '>' + escapeHtml(c) + '</option>'; }).join("");
+      return '<div class="edit-box" id="card-edit-box-' + card.id + '">' +
+        '<div class="form-row"><div class="form-field"><label>Set</label><input type="text" class="input-field focus-ring" id="card-edit-set-' + card.id + '" value="' + escapeHtml(card.set) + '"></div>' +
+        '<div class="form-field"><label>Nummer</label><input type="text" class="input-field focus-ring" id="card-edit-number-' + card.id + '" value="' + escapeHtml(card.number) + '"></div></div>' +
+        '<div class="form-row"><div class="form-field"><label>Menge</label><input type="number" min="1" class="input-field focus-ring" id="card-edit-quantity-' + card.id + '" value="' + card.quantity + '"></div>' +
+        '<div class="form-field"><label>Zustand</label><select class="input-field focus-ring" id="card-edit-condition-' + card.id + '">' + condOptions + '</select></div></div>' +
+        '<label class="foil-checkbox-row"><input type="checkbox" id="card-edit-foil-' + card.id + '" ' + (card.foil ? "checked" : "") + '><span style="font-size:13px;">Foil</span></label>' +
+        '<button type="button" class="btn-primary focus-ring" style="width:100%; margin-top:8px;" data-card-done="' + card.id + '">Fertig</button></div>';
+    }
+    var img = card.previewUrl ? '<img src="' + escapeHtml(card.previewUrl) + '" alt="">' : '<div class="img-placeholder"></div>';
+    var meta = [card.set, card.number, card.rarity, card.language].filter(Boolean).map(escapeHtml).join(" · ");
+    return '<div class="card-row" style="border-left-color:' + g.color + '">' + img +
+      '<div class="info"><div class="name-row"><span class="name">' + (escapeHtml(card.name) || "Unbenannt") + '</span>' +
+      (card.foil ? '<span class="foil-tag">FOIL</span>' : "") + '</div><div class="meta">' + meta + '</div></div>' +
+      '<div class="qty" style="color:' + g.color + '">×' + card.quantity + '</div>' +
+      '<button type="button" class="btn-icon focus-ring" data-card-edit="' + card.id + '">✎</button>' +
+      '<button type="button" class="btn-icon focus-ring" data-card-delete="' + card.id + '">🗑</button></div>';
+  }
+
+  function bindCardRowHandlers(cardList) {
+    cardList.forEach(function (card) {
+      var editBtn = document.querySelector('[data-card-edit="' + card.id + '"]');
+      if (editBtn) editBtn.onclick = function () { editingCardId = editingCardId === card.id ? null : card.id; renderCollection(); };
+      var delBtn = document.querySelector('[data-card-delete="' + card.id + '"]');
+      if (delBtn) delBtn.onclick = function () { deleteCard(card.id); };
+      var doneBtn = document.querySelector('[data-card-done="' + card.id + '"]');
+      if (doneBtn) doneBtn.onclick = function () {
+        var box = document.getElementById("card-edit-box-" + card.id);
+        card.set = box.querySelector("#card-edit-set-" + card.id).value;
+        card.number = box.querySelector("#card-edit-number-" + card.id).value;
+        card.quantity = Math.max(1, parseInt(box.querySelector("#card-edit-quantity-" + card.id).value, 10) || 1);
+        card.condition = box.querySelector("#card-edit-condition-" + card.id).value;
+        card.foil = box.querySelector("#card-edit-foil-" + card.id).checked;
+        editingCardId = null;
+        saveCards();
+        renderCollection();
+      };
+    });
+  }
+
+  function renderFilterChips() {
+    var container = document.getElementById("filter-chips");
+    var chips = [{ key: "all", label: "Alle", color: "#C9A24B" }].concat(
+      Object.keys(GAMES).map(function (key) { return { key: key, label: GAMES[key].label, color: GAMES[key].color }; })
+    );
+    container.innerHTML = chips.map(function (c) {
+      var active = filterGame === c.key;
+      return '<button type="button" class="filter-chip focus-ring ' + (active ? "active" : "") + '" style="color:' + (active ? c.color : "#8A8270") + '; border-color:' + (active ? c.color : "#262219") + '" data-filter="' + c.key + '">' + escapeHtml(c.label) + '</button>';
+    }).join("");
+    container.querySelectorAll("[data-filter]").forEach(function (btn) {
+      btn.onclick = function () { filterGame = btn.getAttribute("data-filter"); renderCollection(); };
+    });
+  }
+
+  function switchView(newView) {
+    view = newView;
+    document.getElementById("view-scan").classList.toggle("hidden", view !== "scan");
+    document.getElementById("view-collection").classList.toggle("hidden", view !== "collection");
+    document.getElementById("tab-scan").classList.toggle("active", view === "scan");
+    document.getElementById("tab-collection").classList.toggle("active", view === "collection");
+    if (view === "collection") renderCollection();
+  }
+
+  function init() {
+    loadState();
+    renderHeaderCount();
+    renderQueue();
+
+    document.getElementById("tab-scan").onclick = function () { switchView("scan"); };
+    document.getElementById("tab-collection").onclick = function () { switchView("collection"); };
+
+    document.querySelectorAll("#foil-mode-row [data-mode]").forEach(function (btn) {
+      btn.onclick = function () {
+        foilMode = btn.getAttribute("data-mode");
+        saveFoilMode();
+        document.querySelectorAll("#foil-mode-row [data-mode]").forEach(function (b) { b.classList.toggle("active", b === btn); });
+      };
+    });
+
+    // Special-Case-Filter (Overnumber/Alt Art/Promo): unabhängige An/Aus-Schalter,
+    // bleiben aktiv bis der Nutzer sie selbst wieder ausschaltet.
+    document.querySelectorAll("#special-filter-row [data-filter]").forEach(function (btn) {
+      var key = btn.getAttribute("data-filter");
+      btn.classList.toggle("active", !!specialFilters[key]);
+      btn.onclick = function () {
+        specialFilters[key] = !specialFilters[key];
+        btn.classList.toggle("active", specialFilters[key]);
+        saveSpecialFilters();
+      };
+    });
+
+    document.getElementById("live-scan-start-btn").onclick = startLiveScan;
+    document.getElementById("live-scan-stop-btn").onclick = stopLiveScan;
+
+    function handleFiles(fileList) {
+      Array.prototype.slice.call(fileList || []).forEach(function (f) { addToQueue(f); });
+    }
+    document.getElementById("camera-input").onchange = function (e) { handleFiles(e.target.files); e.target.value = ""; };
+    document.getElementById("gallery-input").onchange = function (e) { handleFiles(e.target.files); e.target.value = ""; };
+    document.getElementById("gallery-input-visible").onchange = function (e) { handleFiles(e.target.files); e.target.value = ""; };
+    document.getElementById("camera-capture-btn").onclick = function () { document.getElementById("camera-input").click(); };
+    document.getElementById("gallery-btn").onclick = function () { document.getElementById("gallery-input").click(); };
+    document.getElementById("camera-capture-btn-prominent").onclick = function () { document.getElementById("camera-input").click(); };
+    document.getElementById("gallery-btn-prominent").onclick = function () { document.getElementById("gallery-input").click(); };
+
+    document.getElementById("save-all-btn").onclick = saveAllReady;
+    document.getElementById("search-input").oninput = function (e) { searchTerm = e.target.value; renderCollection(); };
+
+    var overlay = document.getElementById("api-key-overlay");
+    if (apiKey) overlay.classList.add("hidden");
+    document.getElementById("api-key-save").onclick = function () {
+      var val = document.getElementById("api-key-input").value.trim();
+      if (!val) return;
+      apiKey = val;
+      try { localStorage.setItem(STORAGE_KEY_APIKEY, apiKey); } catch (e) {}
+      overlay.classList.add("hidden");
+    };
+
+    window.addEventListener("beforeunload", function () {
+      if (liveStream) liveStream.getTracks().forEach(function (t) { t.stop(); });
+    });
+  }
+
+  document.addEventListener("DOMContentLoaded", init);
+})();
+</script>
+</body>
+</html>
