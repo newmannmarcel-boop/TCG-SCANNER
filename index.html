@@ -230,6 +230,7 @@
   <div class="header-title-row">
     <h1 class="font-display">Kartenkammer</h1>
     <span class="header-count" id="header-count">0 Karten</span>
+    <button type="button" id="settings-btn" class="btn-icon focus-ring" style="margin-left:auto; font-size:16px;" title="API-Key einrichten">⚙</button>
   </div>
   <nav>
     <button type="button" class="tab-btn focus-ring active" data-tab="scan" id="tab-scan">Scannen</button>
@@ -441,6 +442,8 @@
       "}\n\n" +
       "Wenn du das Spiel nicht zuordnen kannst, setze \"game\" auf \"unknown\". Wenn ein Feld nicht erkennbar ist, lasse es leer und trage es trotzdem in uncertain_fields ein. " +
       "Besonders wichtig: Prüfe genau, ob direkt hinter der Sammlernummer ein kleiner Stern (*) oder ein anderes Sonderzeichen steht - das markiert oft eine wertvollere Variante (Signature/Secret Rare/Alt Art) derselben Nummer. Wenn du dir bei diesem Detail nicht zu 100% sicher bist, weil es zu klein, unscharf oder durch Glanz/Reflexion überdeckt ist, trage \"number\" in uncertain_fields ein, auch wenn der Rest der Nummer klar lesbar war.";
+
+    if (!apiKey) return Promise.reject(new Error("NO_API_KEY"));
 
     return fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -787,6 +790,8 @@
       if (editBtn) editBtn.onclick = function () { editingQueueId = editingQueueId === entry.id ? null : entry.id; renderQueue(); };
       var removeBtn = list.querySelector('[data-remove="' + entry.id + '"]');
       if (removeBtn) removeBtn.onclick = function () { removeFromQueue(entry.id); };
+      var openKeyBtn = list.querySelector('#open-key-from-error-' + entry.id);
+      if (openKeyBtn) openKeyBtn.onclick = function () { document.getElementById("api-key-overlay").classList.remove("hidden"); };
 
       if (entry.status === "needs_selection") {
         entry.candidates.forEach(function (c) {
@@ -882,7 +887,11 @@
     if (entry.status === "analyzing") {
       bodyHtml = '<div class="analyzing"><span class="spin" style="display:inline-block;">⏳</span> Wird erkannt …</div>';
     } else if (entry.status === "error") {
-      bodyHtml = '<span class="error-text">Erkennung fehlgeschlagen — tippe zum Eintragen</span>';
+      if (entry.errorMessage === "NO_API_KEY") {
+        bodyHtml = '<span class="error-text">Kein API-Key gesetzt — <button type="button" id="open-key-from-error-' + entry.id + '" style="background:none;border:none;color:#C9A24B;font-size:inherit;cursor:pointer;padding:0;text-decoration:underline;">jetzt eintragen</button></span>';
+      } else {
+        bodyHtml = '<span class="error-text">' + escapeHtml(entry.errorMessage || "Erkennung fehlgeschlagen") + ' — tippe ✎ zum Eintragen</span>';
+      }
     } else {
       var metaParts = [gameLabel(entry.game), entry.set, entry.number].filter(Boolean).map(escapeHtml).join(" · ");
       var uf = entry.uncertainFields || [];
@@ -1076,6 +1085,10 @@
         saveSpecialFilters();
       };
     });
+
+    document.getElementById("settings-btn").onclick = function () {
+      document.getElementById("api-key-overlay").classList.remove("hidden");
+    };
 
     document.getElementById("live-scan-start-btn").onclick = startLiveScan;
     document.getElementById("live-scan-stop-btn").onclick = stopLiveScan;
