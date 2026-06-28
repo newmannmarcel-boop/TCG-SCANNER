@@ -210,7 +210,6 @@
 
   details > summary { font-size: 11px; color: #6B6452; cursor: pointer; }
 </style>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
 
@@ -253,7 +252,8 @@
       <button type="button" class="mode-btn focus-ring" data-filter="altArt">Alt Art</button>
       <button type="button" class="mode-btn focus-ring" data-filter="promo">Promo</button>
     </div>
-    <p class="source-note">Erkennung läuft lokal per OCR (liest die Kartennummer vom Foto). Beim ersten Scan lädt der OCR-Motor kurz nach (~5 Sek). Kartenbilder und Daten kommen von Riftcodex.com — bitte Ergebnis kurz prüfen.</p>
+    <p class="source-note">Erkennung per Bildabgleich: beim ersten Start werden alle Kartenbilder einmalig heruntergeladen (~30 Sek). Danach funktioniert der Abgleich dauerhaft offline. Daten von Riftcodex.com — bitte Ergebnis kurz prüfen.</p>
+    <p id="hash-build-status" style="font-size:11px; margin-top:6px; color:#8A8270;"></p>
   </div>
 
   <button type="button" id="live-scan-start-btn" class="btn-primary focus-ring" style="width: 100%; padding: 14px 16px; font-size: 14px; margin-bottom: 10px;">
@@ -361,6 +361,16 @@
   var riftcodexCachePromise = null;
   var STORAGE_KEY_RCACHE = "kartenkammer_riftcodex_v2";
 
+  // --- Bildabgleich-Datenbank ---
+  var WSRV            = "https://images.weserv.nl/?url=";
+  var HASH_DB_NAME    = "kartenkammer-img-hashes";
+  var HASH_STORE      = "hashes";
+  var HASH_SIZE       = 16;
+  var cardHashDB      = null;   // { riftcodexId: Float32Array(768) }
+  var hashBuildDone   = 0;
+  var hashBuildTotal  = 0;
+  var hashBuildActive = false;
+
   function uid() {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   }
@@ -429,120 +439,164 @@
     });
   }
 
-  function cropAndPreprocess(canvas, x, y, w, h, scale) {
-    var out = document.createElement("canvas");
-    out.width = Math.max(1, Math.round(w * scale));
-    out.height = Math.max(1, Math.round(h * scale));
-    var ctx = out.getContext("2d");
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(canvas, x, y, w, h, 0, 0, out.width, out.height);
-    var id = ctx.getImageData(0, 0, out.width, out.height);
-    var d = id.data;
-    var sum = 0;
-    var px = d.length / 4;
-    for (var i = 0; i < d.length; i += 4) {
-      var g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-      d[i] = d[i + 1] = d[i + 2] = g;
-      sum += g;
-    }
-    var avg = sum / px;
-    for (var i = 0; i < d.length; i += 4) {
-      d[i] = d[i + 1] = d[i + 2] = (d[i] > avg ? 255 : 0);
-    }
-    ctx.putImageData(id, 0, 0);
-    return out;
-  }
-
-  function identifyCardOCR(imageUrl) {
-    return new Promise(function (resolve, reject) {
-      var img = new Image();
-      img.onload = function () {
-        var w = img.naturalWidth || img.width;
-        var h = img.naturalHeight || img.height;
-        if (!w || !h) { reject(new Error("Bild konnte nicht geladen werden")); return; }
-
-        var main = document.createElement("canvas");
-        main.width = w; main.height = h;
-        main.getContext("2d").drawImage(img, 0, 0);
-
-        if (typeof Tesseract === "undefined") {
-          reject(new Error("Tesseract nicht geladen — bitte Seite neu laden"));
-          return;
-        }
-
-        // Kartenname: oberer Bereich der Karte (innerhalb des Guide-Rahmens),
-        // 3x skaliert, nur Graustufen (kein hartes Schwellwert — Name hat mehr Kontrast)
-        var nameCx = Math.floor(w * 0.15);
-        var nameCy = Math.floor(h * 0.13);
-        var nameCw = Math.floor(w * 0.70);
-        var nameCh = Math.floor(h * 0.12);
-        var nameCanvas = cropAndEnhance(main, nameCx, nameCy, nameCw, nameCh, 3);
-
-        // Kartennummer: unterer Bereich, 4x skaliert + Schwellwert
-        var numCx = Math.floor(w * 0.15);
-        var numCy = Math.floor(h * 0.79);
-        var numCw = Math.floor(w * 0.70);
-        var numCh = Math.floor(h * 0.12);
-        var numCanvas = cropAndPreprocess(main, numCx, numCy, numCw, numCh, 4);
-
-        Promise.all([
-          Tesseract.recognize(nameCanvas, "eng"),
-          Tesseract.recognize(numCanvas, "eng")
-        ]).then(function (results) {
-          var nameText = (results[0].data.text || "").trim();
-          var numText  = (results[1].data.text || "").replace(/\s/g, "");
-
-          // Nummer: suche Muster wie 045/298 oder 228*/219 oder 228x/219
-          var numMatch = numText.match(/(\d{1,4})\s*([*xX]?)\s*\/\s*(\d{1,4})/);
-          var number = "";
-          var uncertain = [];
-          if (numMatch) {
-            var raw = numMatch[2];
-            var ambiguous = raw === "x" || raw === "X";
-            number = numMatch[1] + (raw === "*" || ambiguous ? "*" : "") + "/" + numMatch[3];
-            if (ambiguous) uncertain.push("number");
-          }
-
-          // Name: erste nicht-leere Zeile, bereinigt
-          var cardName = nameText.split("\n").map(function (l) { return l.trim(); })
-            .filter(function (l) { return l.length > 1; })[0] || "";
-
-          resolve({
-            game: "riftbound",
-            name: cardName,
-            number: number,
-            set: "", rarity: "", foil: false, language: "EN",
-            confidence: (cardName || number) ? "medium" : "low",
-            uncertain_fields: uncertain,
-            notes: ""
-          });
-        }).catch(function (e) {
-          reject(new Error("OCR fehlgeschlagen: " + (e.message || e)));
-        });
-      };
-      img.onerror = function () { reject(new Error("Bild konnte nicht geladen werden")); };
-      img.src = imageUrl;
+  // ---- IndexedDB für Karten-Bild-Hashes ----
+  function openHashIDB() {
+    return new Promise(function(resolve, reject) {
+      var req = indexedDB.open(HASH_DB_NAME, 1);
+      req.onupgradeneeded = function(e) { e.target.result.createObjectStore(HASH_STORE, { keyPath: "id" }); };
+      req.onsuccess = function(e) { resolve(e.target.result); };
+      req.onerror   = function(e) { reject(e.target.error); };
     });
   }
 
-  // Wie cropAndPreprocess aber ohne hartes Schwellwert — für Bereiche mit lesbarer Schrift
-  function cropAndEnhance(canvas, x, y, w, h, scale) {
-    var out = document.createElement("canvas");
-    out.width = Math.max(1, Math.round(w * scale));
-    out.height = Math.max(1, Math.round(h * scale));
-    var ctx = out.getContext("2d");
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(canvas, x, y, w, h, 0, 0, out.width, out.height);
-    var id = ctx.getImageData(0, 0, out.width, out.height);
-    var d = id.data;
-    for (var i = 0; i < d.length; i += 4) {
-      var g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-      // Kontrast leicht erhöhen
-      g = Math.min(255, Math.max(0, (g - 128) * 1.4 + 128));
-      d[i] = d[i + 1] = d[i + 2] = g;
+  function loadHashesFromIDB() {
+    return openHashIDB().then(function(db) {
+      return new Promise(function(resolve, reject) {
+        var req = db.transaction(HASH_STORE, "readonly").objectStore(HASH_STORE).getAll();
+        req.onsuccess = function(e) {
+          cardHashDB = {};
+          (e.target.result || []).forEach(function(row) { cardHashDB[row.id] = new Float32Array(row.hash); });
+          resolve(Object.keys(cardHashDB).length);
+        };
+        req.onerror = function(e) { reject(e.target.error); };
+      });
+    });
+  }
+
+  function saveHashBatch(db, entries) {
+    return new Promise(function(resolve) {
+      try {
+        var tx = db.transaction(HASH_STORE, "readwrite");
+        var store = tx.objectStore(HASH_STORE);
+        entries.forEach(function(e) { store.put(e); });
+        tx.oncomplete = resolve; tx.onerror = resolve;
+      } catch(e) { resolve(); }
+    });
+  }
+
+  function computeColorGrid(source, sx, sy, sw, sh) {
+    var c = document.createElement("canvas");
+    c.width = HASH_SIZE; c.height = HASH_SIZE;
+    var ctx = c.getContext("2d");
+    ctx.drawImage(source, sx, sy, sw, sh, 0, 0, HASH_SIZE, HASH_SIZE);
+    var d = ctx.getImageData(0, 0, HASH_SIZE, HASH_SIZE).data;
+    var grid = new Float32Array(HASH_SIZE * HASH_SIZE * 3);
+    for (var i = 0; i < HASH_SIZE * HASH_SIZE; i++) {
+      grid[i*3] = d[i*4]/255; grid[i*3+1] = d[i*4+1]/255; grid[i*3+2] = d[i*4+2]/255;
     }
-    ctx.putImageData(id, 0, 0);
-    return out;
+    return grid;
+  }
+
+  function cosineSim(a, b) {
+    var dot = 0, na = 0, nb = 0;
+    for (var i = 0; i < a.length; i++) { dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
+    return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-9);
+  }
+
+  function updateHashStatus() {
+    var el = document.getElementById("hash-build-status");
+    if (!el) return;
+    var n = cardHashDB ? Object.keys(cardHashDB).length : 0;
+    if (hashBuildActive) {
+      el.textContent = "Bilder laden … " + hashBuildDone + "/" + hashBuildTotal + " — bitte warten";
+      el.style.color = "#C9A24B";
+    } else if (n > 0) {
+      el.textContent = "Bildabgleich bereit — " + n + " Karten geladen";
+      el.style.color = "#6FCF8F";
+    } else {
+      el.textContent = "Bildabgleich wird gleich gestartet …";
+      el.style.color = "#8A8270";
+    }
+  }
+
+  function buildHashDatabase() {
+    if (hashBuildActive) return Promise.resolve();
+    hashBuildActive = true;
+    updateHashStatus();
+    return Promise.all([loadRiftcodexCache(), loadHashesFromIDB()]).then(function(res) {
+      var allCards = res[0];
+      var cardsToProcess = allCards.filter(function(c) {
+        return c.imageUrl && !(cardHashDB && cardHashDB[c.riftcodexId]);
+      });
+      hashBuildTotal = allCards.filter(function(c) { return c.imageUrl; }).length;
+      hashBuildDone  = hashBuildTotal - cardsToProcess.length;
+      updateHashStatus();
+      if (cardsToProcess.length === 0) { hashBuildActive = false; updateHashStatus(); return; }
+      return openHashIDB().then(function(db) {
+        var BATCH = 5, idx = 0;
+        function nextBatch() {
+          if (idx >= cardsToProcess.length) { hashBuildActive = false; updateHashStatus(); return; }
+          var batch = cardsToProcess.slice(idx, idx + BATCH); idx += BATCH;
+          var dbEntries = [];
+          return Promise.all(batch.map(function(card) {
+            var src = WSRV + card.imageUrl.replace("https://", "") + "&w=50&h=70&fit=inside";
+            return new Promise(function(resolve) {
+              var img = new Image(); img.crossOrigin = "anonymous";
+              img.onload = function() {
+                try {
+                  var iw = img.naturalWidth, ih = img.naturalHeight;
+                  var grid = computeColorGrid(img,
+                    Math.floor(iw*0.05), Math.floor(ih*0.15),
+                    Math.floor(iw*0.90), Math.floor(ih*0.57));
+                  if (!cardHashDB) cardHashDB = {};
+                  cardHashDB[card.riftcodexId] = grid;
+                  dbEntries.push({ id: card.riftcodexId, hash: Array.from(grid) });
+                } catch(e) { /* tainted canvas – skip */ }
+                hashBuildDone++; updateHashStatus(); resolve();
+              };
+              img.onerror = function() { hashBuildDone++; updateHashStatus(); resolve(); };
+              img.src = src;
+            });
+          })).then(function() {
+            if (dbEntries.length) return saveHashBatch(db, dbEntries);
+          }).then(nextBatch);
+        }
+        return nextBatch();
+      });
+    }).catch(function(e) { hashBuildActive = false; updateHashStatus(); console.error("Hash build:", e); });
+  }
+
+  function identifyCardByColor(imageUrl) {
+    return new Promise(function(resolve, reject) {
+      var img = new Image();
+      img.onload = function() {
+        var w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+        if (!w || !h) { reject(new Error("Bild konnte nicht geladen werden")); return; }
+        var n = cardHashDB ? Object.keys(cardHashDB).length : 0;
+        if (n < 10) {
+          resolve({ game: "riftbound", name: "", number: "", confidence: "low",
+            notes: "Bildabgleich lädt noch (" + n + "/" + hashBuildTotal + ") — kurz warten und erneut scannen" });
+          return;
+        }
+        var canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0);
+        // Bildbereich der Karte: Guide top=12%, Höhe=76%; davon Artwork 15%-72%
+        var guideTop = h * 0.12, guideH = h * 0.76;
+        var artY = Math.floor(guideTop + guideH * 0.15);
+        var artH = Math.floor(guideH * 0.57);
+        var artX = Math.floor(w * 0.15);
+        var artW = Math.floor(w * 0.70);
+        var grid;
+        try { grid = computeColorGrid(canvas, artX, artY, artW, artH); }
+        catch(e) { reject(new Error("Bild-Analyse fehlgeschlagen")); return; }
+        var top = [];
+        Object.keys(cardHashDB).forEach(function(id) {
+          top.push({ id: id, score: cosineSim(grid, cardHashDB[id]) });
+        });
+        top.sort(function(a, b) { return b.score - a.score; });
+        top = top.slice(0, 8);
+        var best = top[0] ? top[0].score : 0;
+        resolve({
+          game: "riftbound", name: "", number: "",
+          colorMatchIds: top.map(function(m) { return m.id; }),
+          topScore: best,
+          confidence: best > 0.93 ? "high" : best > 0.83 ? "medium" : "low"
+        });
+      };
+      img.onerror = function() { reject(new Error("Bild konnte nicht geladen werden")); };
+      img.src = imageUrl;
+    });
   }
 
   function loadRiftcodexCache() {
@@ -643,30 +697,19 @@
     });
     renderQueue();
 
-    identifyCardOCR(previewUrl).then(function (result) {
+    identifyCardByColor(previewUrl).then(function (result) {
       var foilValue = foilMode === "foilOnly" ? true : foilMode === "nonFoilOnly" ? false : false;
-      var detectedGame = "riftbound";
-      var uncertainFields = Array.isArray(result.uncertain_fields) ? result.uncertain_fields : [];
 
       var candidatesPromise = Promise.resolve([]);
-      if (result.number) {
-        candidatesPromise = searchRiftboundByNumber(result.number).then(function (res) {
-          // Wenn Nummer keine Treffer → Name-Suche als Fallback
-          if (res.length === 0 && result.name) {
-            return searchRiftboundCards(result.name).catch(function () { return []; });
-          }
-          return res;
-        }).catch(function () {
-          return result.name ? searchRiftboundCards(result.name).catch(function () { return []; }) : [];
+      if (result.colorMatchIds && result.colorMatchIds.length > 0) {
+        candidatesPromise = loadRiftcodexCache().then(function (cache) {
+          return result.colorMatchIds
+            .map(function (id) { return cache.find(function (c) { return c.riftcodexId === id; }); })
+            .filter(function (c) { return !!c; });
         });
-      } else if (result.name) {
-        candidatesPromise = searchRiftboundCards(result.name).catch(function () { return []; });
       }
 
       return candidatesPromise.then(function (candidates) {
-        // Aktive Filter (Overnumber/Alt Art/Promo) sortieren passende Kandidaten nach vorne,
-        // verstecken aber nichts - falls die KI sich beim Namen irrt, bleibt die reguläre
-        // Karte trotzdem auffindbar.
         if (candidates.length > 1) {
           candidates = candidates.slice().sort(function (a, b) {
             var scoreA = 0, scoreB = 0;
@@ -677,30 +720,21 @@
           });
         }
         var hasCandidates = candidates.length > 0;
-        var numberUncertain = uncertainFields.indexOf("number") !== -1;
         var entry = queue.filter(function (e) { return e.id === entryId; })[0];
         if (entry) {
           if (!hasCandidates) {
             entry.status = "error";
-            entry.errorMessage = result.number
-              ? "Nummer " + result.number + " nicht in Riftcodex gefunden — ✎ manuell eintragen"
-              : "Kartennummer nicht lesbar — Karte schärfer halten oder ✎ manuell eintragen";
+            entry.errorMessage = result.notes || "Karte nicht erkannt — Karte schärfer ins Bild halten oder ✎ manuell eintragen";
           } else {
             entry.status = "needs_selection";
           }
-          entry.game = detectedGame;
-          entry.name = "";
-          entry.set = "";
-          entry.number = result.number || "";
-          entry.rarity = "";
-          entry.foil = foilValue;
-          entry.language = "EN";
+          entry.game = "riftbound";
+          entry.name = ""; entry.set = ""; entry.number = ""; entry.rarity = "";
+          entry.foil = foilValue; entry.language = "EN";
           entry.notes = result.notes || "";
           entry.confidence = result.confidence || "medium";
           entry.candidates = candidates;
-          entry.selectedCandidate = null;
-          entry.cardImageUrl = "";
-          entry.uncertainFields = uncertainFields;
+          entry.selectedCandidate = null; entry.cardImageUrl = ""; entry.uncertainFields = [];
         }
         renderQueue();
       });
@@ -1214,8 +1248,8 @@
       document.getElementById("api-key-overlay").classList.remove("hidden");
     };
 
-    // Riftcodex-Kartendatenbank im Hintergrund laden, damit sie beim ersten Scan sofort bereit ist
-    loadRiftcodexCache();
+    // Kartenbilder einmalig herunterladen und als Farb-Fingerabdrücke in IndexedDB speichern
+    buildHashDatabase();
 
     document.getElementById("live-scan-start-btn").onclick = startLiveScan;
     document.getElementById("live-scan-stop-btn").onclick = stopLiveScan;
