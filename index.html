@@ -362,7 +362,7 @@
 
   var riftcodexCache = null;
   var riftcodexCachePromise = null;
-  var STORAGE_KEY_RCACHE = "kartenkammer_riftcodex_v3";
+  var STORAGE_KEY_RCACHE = "kartenkammer_riftcodex_v4";
 
   var _ocrWorker = null; // Tesseract-Worker (wird beim ersten Scan geladen)
 
@@ -593,8 +593,12 @@
   }
 
   function mapRiftcodexCard(card) {
-    // riftbound_id ist der offizielle Feldname — weitere Kandidaten als Fallback
     var num = card.riftbound_id || card.number || card.card_number || card.collector_number || "";
+    // Variantenerkennung aus riftbound_id-Format "prefix-NNN[x]-total":
+    // Buchstabensuffix nach Nummer (z.B. "060a") = Sondervariante (Alt Art, Signature…)
+    var hasLetterSuffix = /^[a-z]+-\d+[a-z]+-\d+$/i.test(num) ||  // "uni-060aa-219"
+                          /^[a-z]+-\d+[a-z]-\d+$/i.test(num);      // "uni-060a-219"
+    var hasOvernumberedMark = num.indexOf("*") !== -1;
     return {
       riftcodexId: card.id,
       name: card.name,
@@ -604,8 +608,8 @@
       rarity: (card.classification && card.classification.rarity) || "",
       imageUrl: (card.media && card.media.image_url) || "",
       isPromo: !!(card.set && card.set.set_id === "OPP"),
-      isAltArt: !!(card.metadata && card.metadata.alternate_art),
-      isOvernumbered: !!(card.metadata && card.metadata.overnumbered),
+      isAltArt: !!(card.metadata && card.metadata.alternate_art) || hasLetterSuffix,
+      isOvernumbered: !!(card.metadata && card.metadata.overnumbered) || hasOvernumberedMark,
       isSignature: !!(card.metadata && card.metadata.signature)
     };
   }
@@ -1038,16 +1042,10 @@
     document.getElementById("save-all-count").textContent = readyCount;
 
     var list = document.getElementById("queue-list");
-    // Nur neuesten Eintrag (index 0) anzeigen
-    var visible = queue.slice(0, 1);
-    var extra = queue.length - 1;
-    list.innerHTML = visible.map(renderQueueRow).join("") +
-      (extra > 0
-        ? '<div style="text-align:center;font-size:12px;color:#8A8270;padding:6px 0 2px;">'
-          + extra + ' weitere ' + (extra === 1 ? 'Karte' : 'Karten') + ' im Stapel</div>'
-        : "");
+    // Alle Einträge anzeigen — neueste oben (queue ist bereits per unshift sortiert)
+    list.innerHTML = queue.map(renderQueueRow).join("");
 
-    visible.forEach(function (entry) {
+    queue.forEach(function (entry) {
       var editBtn = list.querySelector('[data-edit="' + entry.id + '"]');
       if (editBtn) editBtn.onclick = function () { editingQueueId = editingQueueId === entry.id ? null : entry.id; renderQueue(); };
       var removeBtn = list.querySelector('[data-remove="' + entry.id + '"]');
