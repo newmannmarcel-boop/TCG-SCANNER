@@ -148,9 +148,8 @@
   }
   .live-status-pill.capturing { color: #C9A24B; }
   .live-frame-guide {
-    /* TCG-Karte: 63mm × 88mm = 1.4:1 Verhältnis Höhe:Breite
-       Im 3:4-Container (W × 4W/3): Breite 80% → Höhe = 80% × 1.4 / (4/3) = 84% */
-    position: absolute; top: 8%; left: 10%; right: 10%; bottom: 8%;
+    /* TCG-Karte 63×88mm = 1.4:1 — Im 3:4-Container: Breite 72% → Höhe ≈ 76% → AR=1.41 */
+    position: absolute; top: 12%; left: 14%; right: 14%; bottom: 12%;
     border: 2px dashed rgba(201,162,75,0.6); border-radius: 12px; pointer-events: none;
   }
 
@@ -541,21 +540,26 @@
 
   function findCardNumberTesseract(canvas, W, H) {
     if (typeof Tesseract === "undefined") return Promise.resolve(null);
-    var sc = Math.max(2, Math.min(4, Math.round(1200 / W)));
-    // Untere Hälfte (50-98%) — breiter Bereich
-    var lo50 = cropAndScale(canvas, 0, Math.floor(H * 0.50), W, Math.floor(H * 0.48), sc);
-    // Ganz unten (80-100%) — enger Bereich wo die Nummer auf TCG-Karten steht
-    var lo20 = cropAndScale(canvas, 0, Math.floor(H * 0.80), W, Math.floor(H * 0.18), sc);
+    var scBase = Math.max(2, Math.min(4, Math.round(1200 / W)));
+    var scHigh = Math.max(3, Math.min(6, Math.round(1800 / W))); // höhere Auflösung für enge Crops
+    // Untere Hälfte (50-98%) — breiter Suchbereich
+    var lo50 = cropAndScale(canvas, 0, Math.floor(H * 0.50), W, Math.floor(H * 0.48), scBase);
+    // Unteres Fünftel (78-98%) — höherer Scale für schärfere Nummer
+    var lo20 = cropAndScale(canvas, 0, Math.floor(H * 0.78), W, Math.floor(H * 0.20), scHigh);
+    // Sehr enger Bereich ganz unten (88-99%) — genaueste Position der Kartennummer
+    var lo10 = cropAndScale(canvas, 0, Math.floor(H * 0.88), W, Math.floor(H * 0.10), scHigh);
     var attempts = [
-      // Raw Grayscale zuerst — kein Threshold, beste Chance bei unbekannter Beleuchtung
-      { img: toGrayscale(lo50), psm: "11" },
-      { img: toGrayscale(lo20), psm: "6"  },
-      // Binarisiert
-      { img: binarize(lo50, false), psm: "11" },
-      { img: binarize(lo50, true),  psm: "11" },
+      // PSM 7 = einzelne Textzeile → ideal für "012/221"-Format
+      { img: toGrayscale(lo20),       psm: "7"  },
+      { img: binarize(lo20, false),   psm: "7"  },
+      { img: toGrayscale(lo10),       psm: "7"  },
+      { img: binarize(lo10, false),   psm: "7"  },
+      { img: binarize(lo10, true),    psm: "7"  },
+      // PSM 6 / 11 als Fallback für größere Bereiche
+      { img: toGrayscale(lo20),       psm: "6"  },
+      { img: toGrayscale(lo50),       psm: "11" },
+      { img: binarize(lo50, false),   psm: "11" },
       { img: adaptiveThreshold(lo50), psm: "11" },
-      { img: binarize(lo20, false), psm: "6" },
-      { img: binarize(lo20, true),  psm: "6" },
     ];
     return getOCRWorker().then(function(worker) {
       function next(i) {
