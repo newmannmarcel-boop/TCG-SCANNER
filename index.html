@@ -376,6 +376,7 @@
   var liveCameraBlocked = false;
   var liveTorchTrack = null;
   var liveTorchOn = false;
+  var liveTorchMode = "off"; // "off" | "scan" | "on"
 
   var riftcodexCache = null;
   var riftcodexCachePromise = null;
@@ -1087,29 +1088,75 @@
 
   function stopLiveScan() {
     if (liveInterval) { clearInterval(liveInterval); liveInterval = null; }
+    if (liveTorchTrack && liveTorchOn) {
+      try { liveTorchTrack.applyConstraints({ advanced: [{ torch: false }] }); } catch(e){}
+    }
     if (liveStream) { liveStream.getTracks().forEach(function (t) { t.stop(); }); liveStream = null; }
     liveActive = false;
-    liveTorchTrack = null; liveTorchOn = false;
+    liveTorchTrack = null; liveTorchOn = false; liveTorchMode = "off";
     var tb = document.getElementById("live-torch-btn");
-    if (tb) { tb.classList.add("hidden"); tb.classList.remove("on"); tb.textContent = "Blitz an"; }
+    if (tb) { tb.classList.add("hidden"); tb.classList.remove("on"); tb.textContent = "Blitz aus"; }
     document.getElementById("live-video-section").classList.add("hidden");
     if (!liveCameraBlocked) document.getElementById("live-scan-start-btn").classList.remove("hidden");
     setLiveStatusPill("Karte ruhig vor die Kamera halten", false);
   }
 
-  function toggleTorch() {
-    if (!liveTorchTrack || !liveTorchTrack.applyConstraints) return;
-    var next = !liveTorchOn;
-    liveTorchTrack.applyConstraints({ advanced: [{ torch: next }] }).then(function () {
-      liveTorchOn = next;
-      var btn = document.getElementById("live-torch-btn");
-      if (btn) {
-        btn.classList.toggle("on", next);
-        btn.textContent = next ? "Blitz aus" : "Blitz an";
-      }
-    }).catch(function (err) {
-      console.warn("[Blitz] nicht möglich:", err);
-    });
+  // Blitz-Hardware: physikalisch ein-/ausschalten
+  function torchSet(on) {
+    if (!liveTorchTrack || !liveTorchTrack.applyConstraints) return Promise.resolve();
+    return liveTorchTrack.applyConstraints({ advanced: [{ torch: !!on }] })
+      .then(function() { liveTorchOn = !!on; })
+      .catch(function(err) { console.warn("[Blitz] nicht möglich:", err); });
+  }
+
+  // Drei Modi durchwechseln: aus → nur beim Scan → Dauer → aus
+  function cycleTorch() {
+    if (!liveTorchTrack) return;
+    var next = liveTorchMode === "off"  ? "scan"
+             : liveTorchMode === "scan" ? "on"
+             : "off";
+    liveTorchMode = next;
+    var btn = document.getElementById("live-torch-btn");
+    if (btn) {
+      btn.classList.toggle("on", next !== "off");
+      btn.textContent = next === "off"  ? "Blitz aus"
+                      : next === "scan" ? "Blitz: Scan"
+                      : "Blitz: Dauer";
+    }
+    // Dauer = jetzt an, sonst aus (Scan-Modus zündet pro Capture eigenständig)
+    torchSet(next === "on");
+  }
+
+  // Tap-to-Focus: tippe ins Live-Bild, Kamera fokussiert auf diesen Punkt
+  function setupTapToFocus(video, track) {
+    if (!video) return;
+    var caps = track && track.getCapabilities ? track.getCapabilities() : null;
+    var supportsPOI = caps && caps.pointsOfInterest;
+    var supportsFocusMode = caps && caps.focusMode && caps.focusMode.indexOf("single-shot") !== -1;
+    video.onclick = function(e) {
+      var rect = video.getBoundingClientRect();
+      var nx = (e.clientX - rect.left) / rect.width;
+      var ny = (e.clientY - rect.top) / rect.height;
+      showFocusReticle(e.clientX - rect.left, e.clientY - rect.top);
+      if (!track || !track.applyConstraints) return;
+      var adv = {};
+      if (supportsPOI) adv.pointsOfInterest = [{ x: nx, y: ny }];
+      if (supportsFocusMode) adv.focusMode = "single-shot";
+      if (!supportsPOI && !supportsFocusMode) return; // Reticle wurde trotzdem gezeigt — visuelles Feedback
+      track.applyConstraints({ advanced: [adv] }).catch(function(err) {
+        console.warn("[Fokus] nicht setzbar:", err);
+      });
+    };
+  }
+  function showFocusReticle(x, y) {
+    var wrap = document.querySelector(".live-video-wrap");
+    if (!wrap) return;
+    var el = document.createElement("div");
+    el.className = "live-focus-reticle";
+    el.style.left = (x - 30) + "px";
+    el.style.top  = (y - 30) + "px";
+    wrap.appendChild(el);
+    setTimeout(function() { el.remove(); }, 700);
   }
 
   function setLiveStatusPill(text, capturing) {
