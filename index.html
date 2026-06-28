@@ -658,29 +658,38 @@
     if (!number) return Promise.resolve([]);
     var m = number.match(/(\d+)(\*?)\/(\d+)/);
     if (!m) return Promise.resolve([]);
-    var baseNum = parseInt(m[1], 10);
-    var hasStar = m[2] === "*";
+    var baseNum  = parseInt(m[1], 10);
+    var hasStar  = m[2] === "*";
+    var totalNum = parseInt(m[3], 10);
 
     return loadRiftcodexCache().then(function (cache) {
-      // Riftcodex speichert richtbound_id als "uni-012-219" (Bindestrich-Format)
-      // Physische Karte zeigt "012/221" (Schrägstrich-Format)
-      // → Nur Kartennummer vergleichen, Gesamtanzahl und Prefix ignorieren
-      function extractCardNum(str) {
+      // Riftcodex-Format: "uni-012-219"  →  Karte: "012/221"
+      // Num stimmt exakt, Gesamtanzahl kann leicht abweichen (OCR-Fehler, Sonder-Karten)
+      function parseParts(str) {
         if (!str) return null;
-        // Riftcodex-Format: "prefix-NNN[x]-total" z.B. "uni-012-219", "unio-060a-219"
-        var rc = str.match(/^[a-z]+-(\d+)[a-z]?-\d+$/i);
-        if (rc) return parseInt(rc[1], 10);
-        // Fallback: Standard NNN/MMM
-        var std = str.match(/^(\d+)/);
-        return std ? parseInt(std[1], 10) : null;
+        var rc = str.match(/^[a-z]+-(\d+)[a-z]?-(\d+)$/i);
+        if (rc) return { num: parseInt(rc[1], 10), total: parseInt(rc[2], 10) };
+        var std = str.match(/^(\d+)(\*?)\/(\d+)/);
+        if (std) return { num: parseInt(std[1], 10), total: parseInt(std[3], 10) };
+        return null;
       }
 
+      // Primär: Nummer + Gesamtanzahl ähnlich (±20) → grenzt auf richtiges Set ein
       var results = cache.filter(function (card) {
-        return extractCardNum(card.number) === baseNum;
+        var p = parseParts(card.number);
+        return p && p.num === baseNum && Math.abs(p.total - totalNum) <= 20;
       });
 
-      // Zu viele Treffer = wahrscheinlich falsche Nummer erkannt
-      if (results.length > 12) results = [];
+      // Fallback: nur Nummer (Gesamtanzahl ignorieren)
+      if (results.length === 0) {
+        results = cache.filter(function (card) {
+          var p = parseParts(card.number);
+          return p && p.num === baseNum;
+        });
+      }
+
+      // Zu viele Treffer → OCR hat vermutlich falsche Nummer gelesen
+      if (results.length > 10) results = [];
 
       results.sort(function (a, b) {
         var aStar = (a.number || "").indexOf("*") !== -1 ? 1 : 0;
@@ -745,13 +754,22 @@
       return candidatesPromise.then(function (candidates) {
         var entry = queue.filter(function (e) { return e.id === entryId; })[0];
         if (entry) {
+          // Basis-Felder setzen (werden ggf. unten überschrieben)
+          entry.game = "riftbound";
+          entry.number = result.number || "";
+          entry.foil = foilValue; entry.language = "EN";
+          entry.confidence = result.confidence || "medium";
+          entry.uncertainFields = [];
+
           if (candidates.length === 0) {
             entry.status = "error";
+            entry.name = ""; entry.set = ""; entry.rarity = "";
+            entry.candidates = []; entry.selectedCandidate = null; entry.cardImageUrl = "";
             entry.errorMessage = result.number
               ? "Nummer " + result.number + " nicht gefunden — ✎ manuell"
               : "Nummer nicht lesbar — ✎ manuell eintragen";
           } else {
-            // Filter (Promo, Overnumber, Alt Art) eingrenzen
+            // Schritt 1: Filter (Promo, Overnumber, Alt Art) eingrenzen
             var anyFilter = specialFilters.overnumber || specialFilters.altArt || specialFilters.promo;
             var filtered = candidates;
             if (anyFilter) {
@@ -761,19 +779,27 @@
                 if (specialFilters.promo      && !c.isPromo)        return false;
                 return true;
               });
-              // Falls Filter nichts liefert → alle zeigen
               if (narrow.length > 0) filtered = narrow;
             }
 
+            // Schritt 2: Wenn immer noch mehrere → Basiskarte bevorzugen
+            // (nicht Promo, nicht AltArt, nicht Overnumbered, nicht Signature)
+            if (filtered.length > 1) {
+              var base = filtered.filter(function (c) {
+                return !c.isPromo && !c.isAltArt && !c.isOvernumbered && !c.isSignature;
+              });
+              if (base.length === 1) filtered = base;
+            }
+
             if (filtered.length === 1) {
-              // Eindeutig (durch Filter oder generell) → automatisch bestätigen
+              // Eindeutig → automatisch bestätigen
               var ac = filtered[0];
               entry.status = "ready";
               entry.name = ac.name; entry.set = ac.set;
               entry.number = ac.number; entry.rarity = ac.rarity;
-              entry.selectedCandidate = ac; entry.cardImageUrl = ac.imageUrl;
+              entry.candidates = [ac]; entry.selectedCandidate = ac; entry.cardImageUrl = ac.imageUrl;
             } else {
-              // Mehrere Varianten → Auswahl (Filter-Treffer oben)
+              // Mehrdeutig → Auswahl anzeigen, Filter-Treffer oben
               filtered.sort(function (a, b) {
                 var sA = 0, sB = 0;
                 if (specialFilters.overnumber) { sA += a.isOvernumbered ? 1 : 0; sB += b.isOvernumbered ? 1 : 0; }
@@ -781,16 +807,11 @@
                 if (specialFilters.promo)      { sA += a.isPromo ? 1 : 0;       sB += b.isPromo ? 1 : 0; }
                 return sB - sA;
               });
-              candidates = filtered;
               entry.status = "needs_selection";
+              entry.name = ""; entry.set = ""; entry.rarity = "";
+              entry.candidates = filtered; entry.selectedCandidate = null; entry.cardImageUrl = "";
             }
           }
-          entry.game = "riftbound";
-          entry.name = ""; entry.set = ""; entry.number = result.number || ""; entry.rarity = "";
-          entry.foil = foilValue; entry.language = "EN";
-          entry.confidence = result.confidence || "medium";
-          entry.candidates = candidates;
-          entry.selectedCandidate = null; entry.cardImageUrl = ""; entry.uncertainFields = [];
         }
         renderQueue();
         liveBusy = false;
