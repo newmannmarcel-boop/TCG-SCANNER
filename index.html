@@ -493,28 +493,45 @@
     return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-9);
   }
 
-  function updateHashStatus() {
+  function updateHashStatus(errMsg) {
     var el = document.getElementById("hash-build-status");
     if (!el) return;
     var n = cardHashDB ? Object.keys(cardHashDB).length : 0;
-    if (hashBuildActive) {
-      el.textContent = "Bilder laden … " + hashBuildDone + "/" + hashBuildTotal + " — bitte warten";
+    if (errMsg) {
+      el.innerHTML = escapeHtml(errMsg) + ' <button type="button" onclick="retryHashBuild()" style="background:#C9A24B;color:#1A1710;border:none;border-radius:6px;padding:3px 8px;font-size:11px;font-weight:700;cursor:pointer;">Neu starten</button>';
+      el.style.color = "#E07070";
+    } else if (hashBuildActive) {
+      el.textContent = "Bilder laden … " + hashBuildDone + "/" + hashBuildTotal + (hashBuildTotal > 0 ? " (" + Math.round(hashBuildDone/hashBuildTotal*100) + "%)" : "") + " — bitte warten";
       el.style.color = "#C9A24B";
     } else if (n > 0) {
-      el.textContent = "Bildabgleich bereit — " + n + " Karten geladen";
+      el.textContent = "Bildabgleich bereit — " + n + " Karten";
       el.style.color = "#6FCF8F";
     } else {
-      el.textContent = "Bildabgleich wird gleich gestartet …";
+      el.textContent = "Bildabgleich wird gestartet …";
       el.style.color = "#8A8270";
     }
+  }
+
+  function retryHashBuild() {
+    hashBuildActive = false;
+    buildHashDatabase();
   }
 
   function buildHashDatabase() {
     if (hashBuildActive) return Promise.resolve();
     hashBuildActive = true;
     updateHashStatus();
-    return Promise.all([loadRiftcodexCache(), loadHashesFromIDB()]).then(function(res) {
+
+    var rcPromise = loadRiftcodexCache().catch(function() { return []; });
+    var idbPromise = loadHashesFromIDB().catch(function() { cardHashDB = cardHashDB || {}; return 0; });
+
+    return Promise.all([rcPromise, idbPromise]).then(function(res) {
       var allCards = res[0];
+      if (!allCards || allCards.length === 0) {
+        hashBuildActive = false;
+        updateHashStatus("Riftcodex nicht erreichbar — Internetverbindung prüfen");
+        return;
+      }
       var cardsToProcess = allCards.filter(function(c) {
         return c.imageUrl && !(cardHashDB && cardHashDB[c.riftcodexId]);
       });
@@ -522,17 +539,20 @@
       hashBuildDone  = hashBuildTotal - cardsToProcess.length;
       updateHashStatus();
       if (cardsToProcess.length === 0) { hashBuildActive = false; updateHashStatus(); return; }
-      return openHashIDB().then(function(db) {
-        var BATCH = 5, idx = 0;
+
+      return openHashIDB().catch(function() { return null; }).then(function(db) {
+        var BATCH = 3, idx = 0;
         function nextBatch() {
           if (idx >= cardsToProcess.length) { hashBuildActive = false; updateHashStatus(); return; }
           var batch = cardsToProcess.slice(idx, idx + BATCH); idx += BATCH;
           var dbEntries = [];
           return Promise.all(batch.map(function(card) {
-            var src = WSRV + card.imageUrl.replace("https://", "") + "&w=50&h=70&fit=inside";
+            var src = WSRV + card.imageUrl.replace("https://", "") + "&w=30&h=42&fit=inside";
             return new Promise(function(resolve) {
               var img = new Image(); img.crossOrigin = "anonymous";
+              var timer = setTimeout(function() { hashBuildDone++; updateHashStatus(); resolve(); }, 10000);
               img.onload = function() {
+                clearTimeout(timer);
                 try {
                   var iw = img.naturalWidth, ih = img.naturalHeight;
                   var grid = computeColorGrid(img,
@@ -544,16 +564,16 @@
                 } catch(e) { /* tainted canvas – skip */ }
                 hashBuildDone++; updateHashStatus(); resolve();
               };
-              img.onerror = function() { hashBuildDone++; updateHashStatus(); resolve(); };
+              img.onerror = function() { clearTimeout(timer); hashBuildDone++; updateHashStatus(); resolve(); };
               img.src = src;
             });
           })).then(function() {
-            if (dbEntries.length) return saveHashBatch(db, dbEntries);
+            if (db && dbEntries.length) return saveHashBatch(db, dbEntries);
           }).then(nextBatch);
         }
         return nextBatch();
       });
-    }).catch(function(e) { hashBuildActive = false; updateHashStatus(); console.error("Hash build:", e); });
+    }).catch(function(e) { hashBuildActive = false; updateHashStatus("Fehler beim Laden: " + (e.message || e)); });
   }
 
   function identifyCardByColor(imageUrl) {
