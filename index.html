@@ -148,7 +148,7 @@
   }
   .live-status-pill.capturing { color: #C9A24B; }
   .live-frame-guide {
-    position: absolute; top: 6%; left: 8%; right: 8%; bottom: 6%;
+    position: absolute; top: 10%; left: 15%; right: 15%; bottom: 10%;
     border: 2px dashed rgba(201,162,75,0.6); border-radius: 12px; pointer-events: none;
   }
 
@@ -360,7 +360,7 @@
 
   var riftcodexCache = null;
   var riftcodexCachePromise = null;
-  var STORAGE_KEY_RCACHE = "kartenkammer_riftcodex_v2";
+  var STORAGE_KEY_RCACHE = "kartenkammer_riftcodex_v3";
 
   var _ocrWorker = null; // Tesseract-Worker (wird beim ersten Scan geladen)
 
@@ -591,10 +591,12 @@
   }
 
   function mapRiftcodexCard(card) {
+    // riftbound_id ist der offizielle Feldname — weitere Kandidaten als Fallback
+    var num = card.riftbound_id || card.number || card.card_number || card.collector_number || "";
     return {
       riftcodexId: card.id,
       name: card.name,
-      number: card.riftbound_id || "",
+      number: num,
       set: (card.set && card.set.label) || "",
       setId: (card.set && card.set.set_id) || "",
       rarity: (card.classification && card.classification.rarity) || "",
@@ -635,7 +637,10 @@
         });
       })
       .then(function (allItems) {
+        // Rohdaten-Sample für Diagnose speichern
+        if (allItems.length > 0) window._riftRawSample = allItems[0];
         riftcodexCache = allItems.map(mapRiftcodexCard);
+        window._riftWithNumber = riftcodexCache.filter(function(c) { return !!c.number; }).length;
         try { localStorage.setItem(STORAGE_KEY_RCACHE, JSON.stringify(riftcodexCache)); } catch (e) {}
         riftcodexCachePromise = null;
         return riftcodexCache;
@@ -750,7 +755,7 @@
           if (candidates.length === 0) {
             entry.status = "error";
             entry.errorMessage = result.number
-              ? "Nummer " + result.number + " nicht gefunden (" + (riftcodexCache ? riftcodexCache.length : 0) + " Karten). Format-Beispiele: " + (window._riftDebugSamples || "?") + " — ✎ manuell"
+              ? "Nummer " + result.number + " nicht gefunden. " + (window._riftWithNumber || 0) + "/" + (riftcodexCache ? riftcodexCache.length : 0) + " Karten haben Nummer. Beispiele: " + (window._riftDebugSamples || "?") + " — ✎ manuell"
               : "Nummer nicht lesbar — ✎ manuell eintragen";
           } else if (candidates.length === 1) {
             // Eindeutiger Treffer → automatisch bestätigen
