@@ -140,7 +140,7 @@
   .foil-checkbox-row input { width: 16px; height: 16px; accent-color: #C9A24B; }
 
   .live-video-wrap { position: relative; border-radius: 14px; overflow: hidden; background: #000; margin-bottom: 8px; }
-  .live-video-wrap video { width: 100%; display: block; aspect-ratio: 4 / 3; object-fit: cover; }
+  .live-video-wrap video { width: 100%; display: block; aspect-ratio: 3 / 4; object-fit: cover; }
   .live-status-bar { position: absolute; top: 10px; left: 10px; right: 10px; display: flex; justify-content: space-between; align-items: center; }
   .live-status-pill {
     background: rgba(0,0,0,0.55); color: #EDE7D9; font-size: 11px; font-weight: 600; padding: 5px 10px;
@@ -148,7 +148,7 @@
   }
   .live-status-pill.capturing { color: #C9A24B; }
   .live-frame-guide {
-    position: absolute; top: 12%; left: 15%; right: 15%; bottom: 12%;
+    position: absolute; top: 6%; left: 8%; right: 8%; bottom: 6%;
     border: 2px dashed rgba(201,162,75,0.6); border-radius: 12px; pointer-events: none;
   }
 
@@ -838,7 +838,7 @@
       return;
     }
     navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 960 } },
+      video: { facingMode: "environment", width: { ideal: 720 }, height: { ideal: 960 } },
       audio: false
     }).then(function (stream) {
       liveStream = stream;
