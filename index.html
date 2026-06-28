@@ -148,7 +148,9 @@
   }
   .live-status-pill.capturing { color: #C9A24B; }
   .live-frame-guide {
-    position: absolute; top: 10%; left: 15%; right: 15%; bottom: 10%;
+    /* TCG-Karte: 63mm × 88mm = 1.4:1 Verhältnis Höhe:Breite
+       Im 3:4-Container (W × 4W/3): Breite 80% → Höhe = 80% × 1.4 / (4/3) = 84% */
+    position: absolute; top: 8%; left: 10%; right: 10%; bottom: 8%;
     border: 2px dashed rgba(201,162,75,0.6); border-radius: 12px; pointer-events: none;
   }
 
