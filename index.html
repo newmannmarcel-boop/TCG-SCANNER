@@ -663,8 +663,7 @@
     var totalNum = parseInt(m[3], 10);
 
     return loadRiftcodexCache().then(function (cache) {
-      // Riftcodex-Format: "uni-012-219"  →  Karte: "012/221"
-      // Num stimmt exakt, Gesamtanzahl kann leicht abweichen (OCR-Fehler, Sonder-Karten)
+      // Riftcodex-Format: "uni-060a-219"  ↔  Karte: "060/221"
       function parseParts(str) {
         if (!str) return null;
         var rc = str.match(/^[a-z]+-(\d+)[a-z]?-(\d+)$/i);
@@ -674,22 +673,35 @@
         return null;
       }
 
-      // Primär: Nummer + Gesamtanzahl ähnlich (±20) → grenzt auf richtiges Set ein
-      var results = cache.filter(function (card) {
+      // Alle Karten mit exakt dieser Kartennummer (aus allen Sets)
+      var byNum = cache.filter(function (card) {
         var p = parseParts(card.number);
-        return p && p.num === baseNum && Math.abs(p.total - totalNum) <= 20;
+        return p && p.num === baseNum;
       });
 
-      // Fallback: nur Nummer (Gesamtanzahl ignorieren)
-      if (results.length === 0) {
-        results = cache.filter(function (card) {
-          var p = parseParts(card.number);
-          return p && p.num === baseNum;
-        });
-      }
+      if (byNum.length === 0) return [];
 
-      // Zu viele Treffer → OCR hat vermutlich falsche Nummer gelesen
-      if (results.length > 10) results = [];
+      // Unter den gefundenen Sets dasjenige wählen, dessen Gesamtanzahl
+      // dem OCR-Wert am nächsten liegt → verhindert falsche Set-Treffer
+      var totals = {};
+      byNum.forEach(function (card) {
+        var p = parseParts(card.number);
+        if (p) totals[p.total] = (totals[p.total] || 0) + 1;
+      });
+      var bestTotal = null, bestDiff = Infinity;
+      Object.keys(totals).forEach(function (t) {
+        var diff = Math.abs(parseInt(t, 10) - totalNum);
+        if (diff < bestDiff) { bestDiff = diff; bestTotal = parseInt(t, 10); }
+      });
+
+      // Nur Karten aus dem nächsten Set zurückgeben
+      var results = byNum.filter(function (card) {
+        var p = parseParts(card.number);
+        return p && p.total === bestTotal;
+      });
+
+      // Sanity-Check: zu viele Varianten → OCR hat wahrscheinlich falsch gelesen
+      if (results.length > 8) return [];
 
       results.sort(function (a, b) {
         var aStar = (a.number || "").indexOf("*") !== -1 ? 1 : 0;
