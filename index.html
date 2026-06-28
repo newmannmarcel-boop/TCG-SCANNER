@@ -440,7 +440,7 @@
     return Tesseract.createWorker("eng").then(function(w) {
       return w.setParameters({
         tessedit_char_whitelist: "0123456789/*",
-        tessedit_pageseg_mode: "7"
+        tessedit_pageseg_mode: "11"  // PSM 11 = Sparse text: findet Text überall im Bild
       }).then(function() { _ocrWorker = w; return w; });
     });
   }
@@ -450,16 +450,27 @@
     out.width = Math.max(1, Math.round(w * scale));
     out.height = Math.max(1, Math.round(h * scale));
     var ctx = out.getContext("2d");
-    ctx.imageSmoothingEnabled = false;
+    ctx.imageSmoothingEnabled = scale < 1;
     ctx.drawImage(src, x, y, w, h, 0, 0, out.width, out.height);
     return out;
+  }
+
+  function toGrayscale(canvas) {
+    var out = document.createElement("canvas");
+    out.width = canvas.width; out.height = canvas.height;
+    var ctx = out.getContext("2d"); ctx.drawImage(canvas, 0, 0);
+    var id = ctx.getImageData(0, 0, out.width, out.height), d = id.data;
+    for (var i = 0; i < d.length; i += 4) {
+      var g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+      d[i]=d[i+1]=d[i+2]=g;
+    }
+    ctx.putImageData(id, 0, 0); return out;
   }
 
   function binarize(canvas, invert) {
     var out = document.createElement("canvas");
     out.width = canvas.width; out.height = canvas.height;
-    var ctx = out.getContext("2d");
-    ctx.drawImage(canvas, 0, 0);
+    var ctx = out.getContext("2d"); ctx.drawImage(canvas, 0, 0);
     var id = ctx.getImageData(0, 0, out.width, out.height);
     var d = id.data, sum = 0, px = d.length / 4;
     for (var i = 0; i < d.length; i += 4) {
@@ -471,49 +482,81 @@
       var v = d[i] > avg ? 255 : 0;
       d[i]=d[i+1]=d[i+2]= invert ? 255-v : v;
     }
-    ctx.putImageData(id, 0, 0);
-    return out;
+    ctx.putImageData(id, 0, 0); return out;
+  }
+
+  function adaptiveThreshold(src) {
+    // Grayscale zuerst
+    var gray = toGrayscale(src);
+    // Geblurrte Version als lokalen Mittelwert berechnen
+    var blr = document.createElement("canvas");
+    blr.width = gray.width; blr.height = gray.height;
+    var bCtx = blr.getContext("2d");
+    bCtx.filter = "blur(" + Math.max(2, Math.round(gray.width / 25)) + "px)";
+    bCtx.drawImage(gray, 0, 0); bCtx.filter = "none";
+    var orig = gray.getContext("2d").getImageData(0, 0, gray.width, gray.height);
+    var blur = bCtx.getImageData(0, 0, blr.width, blr.height);
+    var out = document.createElement("canvas");
+    out.width = gray.width; out.height = gray.height;
+    var oCtx = out.getContext("2d");
+    var oId = oCtx.createImageData(out.width, out.height);
+    for (var i = 0; i < orig.data.length; i += 4) {
+      var v = orig.data[i] < blur.data[i] - 6 ? 0 : 255;
+      oId.data[i]=oId.data[i+1]=oId.data[i+2]=v; oId.data[i+3]=255;
+    }
+    oCtx.putImageData(oId, 0, 0); return out;
   }
 
   function parseCardNumber(text) {
-    // O→0, l/I→1 für typische OCR-Fehler bei Ziffern
-    var t = (text || "").replace(/\s/g, "")
-      .replace(/[oO]/g, "0").replace(/[lLI|]/g, "1");
-    var m = t.match(/(\d{1,4})[*]?\/(\d{1,4})/);
+    var t = (text || "").replace(/\s+/g, "")
+      .replace(/[oO]/g, "0").replace(/[lLI|]/g, "1").replace(/[bB]/g, "6");
+    var m = t.match(/(\d{1,4})[*xX]?\/(\d{1,4})/);
     return m ? m[1] + "/" + m[2] : null;
   }
 
-  // Liest Kartennummer aus einem Canvas-Ausschnitt
-  // Versucht zuerst nativen TextDetector (Chrome/Android), dann Tesseract
-  function readNumberFromCrop(canvas, x, y, w, h) {
+  // Sucht die Kartennummer im unteren Teil des Bildes
+  // 1) Nativer TextDetector (Chrome/Android — kein Download nötig)
+  // 2) Tesseract mit Digit-Whitelist als Fallback
+  function findCardNumber(canvas) {
+    var W = canvas.width, H = canvas.height;
+    // Großzügiger Suchbereich: unteres Drittel des Bildes
+    var stripY = Math.floor(H * 0.60);
+    var stripH = Math.floor(H * 0.38);
+
     if (typeof TextDetector !== "undefined") {
-      var crop = cropAndScale(canvas, x, y, w, h, 3);
-      return new TextDetector().detect(crop).then(function(texts) {
+      var strip = cropAndScale(canvas, 0, stripY, W, stripH, 1);
+      return new TextDetector().detect(strip).then(function(texts) {
         for (var i = 0; i < texts.length; i++) {
           var n = parseCardNumber(texts[i].rawValue);
           if (n) return n;
         }
         return null;
       }).catch(function() { return null; }).then(function(n) {
-        return n || readNumberTesseract(canvas, x, y, w, h);
+        return n || findCardNumberTesseract(canvas, W, H, stripY, stripH);
       });
     }
-    return readNumberTesseract(canvas, x, y, w, h);
+    return findCardNumberTesseract(canvas, W, H, stripY, stripH);
   }
 
-  function readNumberTesseract(canvas, x, y, w, h) {
+  function findCardNumberTesseract(canvas, W, H, stripY, stripH) {
     if (typeof Tesseract === "undefined") return Promise.resolve(null);
+    var scale = Math.max(2, Math.min(4, Math.round(1200 / W)));
+    // 5 Versuche mit unterschiedlicher Vorverarbeitung
     var attempts = [
-      binarize(cropAndScale(canvas, x, y, w, h, 5), false),
-      binarize(cropAndScale(canvas, x, y, w, h, 5), true),
-      binarize(cropAndScale(canvas, x, y, w, h, 6), false)
+      binarize(cropAndScale(canvas, 0, stripY, W, stripH, scale), false),
+      binarize(cropAndScale(canvas, 0, stripY, W, stripH, scale), true),
+      adaptiveThreshold(cropAndScale(canvas, 0, stripY, W, stripH, scale)),
+      toGrayscale(cropAndScale(canvas, 0, stripY, W, stripH, scale)),  // roh, kein Threshold
+      // Engerer Crop in der Mitte als Extra-Versuch
+      binarize(cropAndScale(canvas, Math.floor(W*0.15), Math.floor(H*0.75),
+        Math.floor(W*0.70), Math.floor(H*0.20), scale), false)
     ];
     return getOCRWorker().then(function(worker) {
       function next(i) {
         if (i >= attempts.length) return null;
         return worker.recognize(attempts[i]).then(function(r) {
           return parseCardNumber(r.data.text) || next(i + 1);
-        });
+        }).catch(function() { return next(i + 1); });
       }
       return next(0);
     }).catch(function() { return null; });
@@ -523,25 +566,12 @@
     return new Promise(function(resolve, reject) {
       var img = new Image();
       img.onload = function() {
-        var W = img.naturalWidth || img.width;
-        var H = img.naturalHeight || img.height;
+        var W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
         if (!W || !H) { reject(new Error("Bild nicht ladbar")); return; }
         var canvas = document.createElement("canvas");
         canvas.width = W; canvas.height = H;
         canvas.getContext("2d").drawImage(img, 0, 0);
-
-        // Kartennummer: untere ~10% des Guide-Rechtecks (Guide: top 12%, bottom 88%)
-        var gH = Math.floor(H * 0.76);
-        var gBottom = Math.floor(H * 0.88);
-        var numH = Math.floor(gH * 0.10);
-        var numX = Math.floor(W * 0.20);
-        var numW = Math.floor(W * 0.60);
-        var numY1 = gBottom - numH - Math.floor(gH * 0.01);  // dicht am Boden
-        var numY2 = numY1 - numH;                             // eine Zeile höher
-
-        readNumberFromCrop(canvas, numX, numY1, numW, numH).then(function(n) {
-          return n || readNumberFromCrop(canvas, numX, numY2, numW, numH);
-        }).then(function(number) {
+        findCardNumber(canvas).then(function(number) {
           resolve({
             game: "riftbound", name: "", number: number || "",
             confidence: number ? "medium" : "low",
@@ -872,17 +902,7 @@
 
     setLiveStatusPill("Lese Nummer …", true);
 
-    // OCR direkt auf Canvas (kein Blob nötig für die Erkennung)
-    var W = canvas.width, H = canvas.height;
-    var gH = Math.floor(H * 0.76), gBottom = Math.floor(H * 0.88);
-    var numH = Math.floor(gH * 0.10);
-    var numX = Math.floor(W * 0.20), numW = Math.floor(W * 0.60);
-    var numY1 = gBottom - numH - Math.floor(gH * 0.01);
-    var numY2 = numY1 - numH;
-
-    readNumberFromCrop(canvas, numX, numY1, numW, numH).then(function(n) {
-      return n || readNumberFromCrop(canvas, numX, numY2, numW, numH);
-    }).then(function(number) {
+    findCardNumber(canvas).then(function(number) {
       if (!number) {
         setLiveStatusPill("Keine Nummer erkannt — Karte ruhig halten", false);
         liveBusy = false;
