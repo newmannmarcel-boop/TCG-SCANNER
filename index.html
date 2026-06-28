@@ -681,35 +681,48 @@
         return null;
       }
 
+      // Plausibilitätsprüfung: OCR-Lesefehler früh ausschließen
+      // Riftbound: mind. 100 Karten pro Set; Kartennummer kann nicht größer als Gesamtanzahl sein
+      if (totalNum < 100 || baseNum < 1 || baseNum > totalNum) return [];
+
       // Alle Karten mit exakt dieser Kartennummer (aus allen Sets)
       var byNum = cache.filter(function (card) {
         var p = parseParts(card.number);
         return p && p.num === baseNum;
       });
-
       if (byNum.length === 0) return [];
 
-      // Unter den gefundenen Sets dasjenige wählen, dessen Gesamtanzahl
-      // dem OCR-Wert am nächsten liegt → verhindert falsche Set-Treffer
+      // Sets nach Gesamtanzahl gruppieren
       var totals = {};
       byNum.forEach(function (card) {
         var p = parseParts(card.number);
         if (p) totals[p.total] = (totals[p.total] || 0) + 1;
       });
-      var bestTotal = null, bestDiff = Infinity;
-      Object.keys(totals).forEach(function (t) {
-        var diff = Math.abs(parseInt(t, 10) - totalNum);
-        if (diff < bestDiff) { bestDiff = diff; bestTotal = parseInt(t, 10); }
+
+      // Alle Sets einbeziehen deren Gesamtzahl ≤ 8 vom OCR-Wert abweicht
+      // (OCR liest z.B. "219" statt "221" → beide Sets als Kandidaten behalten)
+      var nearTotals = Object.keys(totals).map(Number).filter(function (t) {
+        return Math.abs(t - totalNum) <= 8;
       });
 
-      // Nur Karten aus dem nächsten Set zurückgeben
+      // Kein Set nahe genug → einzeln nächstes nehmen, max. Diff 40
+      if (nearTotals.length === 0) {
+        var bestDiff = Infinity, bestTotal = null;
+        Object.keys(totals).forEach(function (t) {
+          var d = Math.abs(parseInt(t, 10) - totalNum);
+          if (d < bestDiff) { bestDiff = d; bestTotal = parseInt(t, 10); }
+        });
+        if (bestDiff > 40) return [];
+        nearTotals = [bestTotal];
+      }
+
       var results = byNum.filter(function (card) {
         var p = parseParts(card.number);
-        return p && p.total === bestTotal;
+        return p && nearTotals.indexOf(p.total) !== -1;
       });
 
       // Sanity-Check: zu viele Varianten → OCR hat wahrscheinlich falsch gelesen
-      if (results.length > 8) return [];
+      if (results.length > 10) return [];
 
       results.sort(function (a, b) {
         var aStar = (a.number || "").indexOf("*") !== -1 ? 1 : 0;
