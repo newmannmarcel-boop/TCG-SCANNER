@@ -656,30 +656,30 @@
     if (!number) return Promise.resolve([]);
     var m = number.match(/(\d+)(\*?)\/(\d+)/);
     if (!m) return Promise.resolve([]);
-    var baseNum = parseInt(m[1], 10);   // Führende Nullen egal: "045" == 45 == "45"
+    var baseNum = parseInt(m[1], 10);
     var hasStar = m[2] === "*";
-    var totalNum = parseInt(m[3], 10);
+
     return loadRiftcodexCache().then(function (cache) {
-      // Exakter Treffer (Nummer + Gesamtanzahl)
+      // Riftcodex speichert richtbound_id als "uni-012-219" (Bindestrich-Format)
+      // Physische Karte zeigt "012/221" (Schrägstrich-Format)
+      // → Nur Kartennummer vergleichen, Gesamtanzahl und Prefix ignorieren
+      function extractCardNum(str) {
+        if (!str) return null;
+        // Riftcodex-Format: "prefix-NNN[x]-total" z.B. "uni-012-219", "unio-060a-219"
+        var rc = str.match(/^[a-z]+-(\d+)[a-z]?-\d+$/i);
+        if (rc) return parseInt(rc[1], 10);
+        // Fallback: Standard NNN/MMM
+        var std = str.match(/^(\d+)/);
+        return std ? parseInt(std[1], 10) : null;
+      }
+
       var results = cache.filter(function (card) {
-        var cm = (card.number || "").match(/(\d+)(\*?)\/(\d+)/);
-        if (!cm) return false;
-        return parseInt(cm[1], 10) === baseNum && parseInt(cm[3], 10) === totalNum;
+        return extractCardNum(card.number) === baseNum;
       });
-      // Fallback: nur nach Kartennummer suchen (Gesamtanzahl ignorieren)
-      if (results.length === 0) {
-        results = cache.filter(function (card) {
-          var cm = (card.number || "").match(/^(\d+)/);
-          return cm && parseInt(cm[1], 10) === baseNum;
-        });
-      }
-      // Diagnose: Format-Beispiele für Fehlermeldung
-      if (results.length === 0) {
-        var sampleNums = cache.filter(function(c) { return c.number; }).slice(0, 3).map(function(c) { return '"' + c.number + '"'; });
-        window._riftDebugSamples = sampleNums.join(", ");
-      }
-      // Zu viele Treffer = OCR hat wahrscheinlich falsche Nummer gelesen → verwerfen
-      if (results.length > 8) results = [];
+
+      // Zu viele Treffer = wahrscheinlich falsche Nummer erkannt
+      if (results.length > 12) results = [];
+
       results.sort(function (a, b) {
         var aStar = (a.number || "").indexOf("*") !== -1 ? 1 : 0;
         var bStar = (b.number || "").indexOf("*") !== -1 ? 1 : 0;
