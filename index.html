@@ -529,11 +529,16 @@
   // → { number: "165/298", setCode: "OGN" } oder null wenn keine Nummer gefunden
   function parseCardInfo(text) {
     var raw = text || "";
-    // Set-Code aus dem ROH-Text (vor Zahlen-Substitutionen, sonst verlieren wir O→0)
-    // 2-4 Großbuchstaben, idealerweise direkt neben der Nummer
+    // Set-Code: exakt 3 Großbuchstaben (vermeidet falsche 2-Buchstaben-Treffer
+    // wie "EN" Sprachcode oder Initialen vom Künstler). Aus ALLEN Vorkommen
+    // wird das genommen das einer Zahl benachbart ist, sonst das erste.
     var setCode = null;
-    var setMatch = raw.match(/\b([A-Z]{2,4})\b/);
-    if (setMatch) setCode = setMatch[1];
+    var allCaps = raw.match(/\b[A-Z]{3}\b/g) || [];
+    if (allCaps.length) {
+      // Bevorzuge Codes die direkt vor einer Zahl stehen (z.B. "OGN 165/298")
+      var nearNumber = raw.match(/\b([A-Z]{3})[\s\-_]*\d/);
+      setCode = nearNumber ? nearNumber[1] : allCaps[0];
+    }
     // Nummer mit OCR-Korrekturen
     var t = raw.replace(/\s+/g, "")
       .replace(/[oO]/g, "0").replace(/[lLI|]/g, "1").replace(/[bB]/g, "6");
@@ -558,9 +563,10 @@
       var strip = cropAndScale(canvas, 0, stripY, W, stripH, 1);
       return new TextDetector().detect(strip).then(function(texts) {
         // Set-Code aus ALLEN gefundenen Textblöcken sammeln, nicht nur dem ersten
+        // Strikt 3 Großbuchstaben (vermeidet 2-Buchstaben-Fehltreffer wie "EN")
         var setCode = null;
         for (var j = 0; j < texts.length; j++) {
-          var sm = (texts[j].rawValue || "").match(/\b([A-Z]{2,4})\b/);
+          var sm = (texts[j].rawValue || "").match(/\b([A-Z]{3})\b/);
           if (sm) { setCode = sm[1]; break; }
         }
         for (var i = 0; i < texts.length; i++) {
@@ -578,31 +584,48 @@
     return findCardNumberTesseract(canvas, W, H);
   }
 
+  // Cache der letzten Tesseract-PSM-Einstellung — vermeidet redundante setParameters-Aufrufe
+  var _lastTesseractPsm = null;
+  function applyPsm(worker, psm) {
+    if (_lastTesseractPsm === psm) return Promise.resolve(worker);
+    return worker.setParameters({ tessedit_pageseg_mode: psm }).then(function() {
+      _lastTesseractPsm = psm;
+      return worker;
+    });
+  }
+
   function findCardNumberTesseract(canvas, W, H) {
     if (typeof Tesseract === "undefined") return Promise.resolve(null);
-    var scBase = Math.max(2, Math.min(4, Math.round(1200 / W)));
-    var scHigh = Math.max(3, Math.min(5, Math.round(1600 / W)));
-    // Crops nur on-demand bauen (lazy) — spart Arbeit wenn 1. Versuch klappt
-    var _lo50, _lo20, _lo10;
-    function lo50() { return _lo50 || (_lo50 = cropAndScale(canvas, 0, Math.floor(H * 0.50), W, Math.floor(H * 0.48), scBase)); }
-    function lo20() { return _lo20 || (_lo20 = cropAndScale(canvas, 0, Math.floor(H * 0.78), W, Math.floor(H * 0.20), scHigh)); }
-    function lo10() { return _lo10 || (_lo10 = cropAndScale(canvas, 0, Math.floor(H * 0.88), W, Math.floor(H * 0.10), scHigh)); }
+    // Gezielter Mini-Crop: unten-links, wo die Nummer auf TCG-Karten steht
+    // (Guide-Box: left 14%, bottom 12% → Karte unten ≈ 88% H, links ≈ 16% W)
+    // Sehr kleine Bildfläche → Tesseract läuft 5-10× schneller pro Versuch
+    var nbX = Math.floor(W * 0.14);
+    var nbW = Math.floor(W * 0.40);  // linke 40% des Bilds
+    var nbY = Math.floor(H * 0.83);
+    var nbH = Math.floor(H * 0.10);
+    // Auf moderate OCR-Größe skalieren (Ziel ~800px breit, Text ~40px hoch)
+    var nbScale = Math.max(1.5, Math.min(3, 800 / nbW));
 
-    // 6 Versuche — die häufigsten Erfolgs-Varianten zuerst.
-    // Lazy build: jeder Crop wird nur erzeugt wenn der Versuch tatsächlich dran ist
+    var scBase = Math.max(1.5, Math.min(2.5, 1000 / W));
+    var _nb, _lo20, _lo50;
+    function nbCrop() { return _nb   || (_nb   = cropAndScale(canvas, nbX, nbY, nbW, nbH, nbScale)); }
+    function lo20()   { return _lo20 || (_lo20 = cropAndScale(canvas, 0, Math.floor(H * 0.78), W, Math.floor(H * 0.20), scBase)); }
+    function lo50()   { return _lo50 || (_lo50 = cropAndScale(canvas, 0, Math.floor(H * 0.50), W, Math.floor(H * 0.48), scBase)); }
+
+    // 5 Versuche — zuerst der kleine zielgerichtete Crop (super schnell),
+    // dann wachsende Fallbacks falls die Karte nicht perfekt im Frame liegt
     var attempts = [
-      { make: function() { return toGrayscale(lo20()); },        psm: "7"  },
-      { make: function() { return toGrayscale(lo10()); },        psm: "7"  },
-      { make: function() { return binarize(lo20(), false); },    psm: "7"  },
-      { make: function() { return binarize(lo10(), true);  },    psm: "7"  }, // helle Schrift auf dunklem Karten-Footer
-      { make: function() { return adaptiveThreshold(lo20()); },  psm: "7"  },
-      { make: function() { return toGrayscale(lo50()); },        psm: "11" }
+      { make: function() { return toGrayscale(nbCrop()); },       psm: "7" },
+      { make: function() { return binarize(nbCrop(), true);  },   psm: "7" }, // helle Schrift auf dunklem Footer
+      { make: function() { return adaptiveThreshold(nbCrop()); }, psm: "7" },
+      { make: function() { return toGrayscale(lo20()); },         psm: "7" },
+      { make: function() { return toGrayscale(lo50()); },         psm: "11" }
     ];
     return getOCRWorker().then(function(worker) {
       function next(i) {
         if (i >= attempts.length) return null;
         var a = attempts[i];
-        return worker.setParameters({ tessedit_pageseg_mode: a.psm })
+        return applyPsm(worker, a.psm)
           .then(function() { return worker.recognize(a.make()); })
           .then(function(r) { return parseCardInfo(r.data.text) || next(i + 1); })
           .catch(function() { return next(i + 1); });
@@ -1018,7 +1041,7 @@
       liveActive = true;
       document.getElementById("live-scan-start-btn").classList.add("hidden");
       document.getElementById("live-video-section").classList.remove("hidden");
-      liveInterval = setInterval(captureLiveFrame, 2500);
+      liveInterval = setInterval(captureLiveFrame, 1500);
     }).catch(function (e) {
       console.error(e);
       var name = (e && e.name) ? e.name : "UnknownError";
