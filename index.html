@@ -210,6 +210,7 @@
 
   details > summary { font-size: 11px; color: #6B6452; cursor: pointer; }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
 
@@ -252,8 +253,8 @@
       <button type="button" class="mode-btn focus-ring" data-filter="altArt">Alt Art</button>
       <button type="button" class="mode-btn focus-ring" data-filter="promo">Promo</button>
     </div>
-    <p class="source-note">Erkennung per Bildabgleich: beim ersten Start werden alle Kartenbilder einmalig heruntergeladen (~30 Sek). Danach funktioniert der Abgleich dauerhaft offline. Daten von Riftcodex.com — bitte Ergebnis kurz prüfen.</p>
-    <p id="hash-build-status" style="font-size:11px; margin-top:6px; color:#8A8270;"></p>
+    <p class="source-note">Erkennung liest die Kartennummer per OCR (Chrome Android: nativer TextDetector; andere Browser: Tesseract.js). Beim ersten Scan lädt der OCR-Motor kurz nach (~5 Sek). Kartendaten von Riftcodex.com.</p>
+    <p id="ocr-engine-status" style="font-size:11px; margin-top:6px; color:#8A8270;"></p>
   </div>
 
   <button type="button" id="live-scan-start-btn" class="btn-primary focus-ring" style="width: 100%; padding: 14px 16px; font-size: 14px; margin-bottom: 10px;">
@@ -361,15 +362,7 @@
   var riftcodexCachePromise = null;
   var STORAGE_KEY_RCACHE = "kartenkammer_riftcodex_v2";
 
-  // --- Bildabgleich-Datenbank ---
-  var WSRV            = "https://images.weserv.nl/?url=";
-  var HASH_DB_NAME    = "kartenkammer-img-hashes";
-  var HASH_STORE      = "hashes";
-  var HASH_SIZE       = 16;
-  var cardHashDB      = null;   // { riftcodexId: Float32Array(768) }
-  var hashBuildDone   = 0;
-  var hashBuildTotal  = 0;
-  var hashBuildActive = false;
+  var _ocrWorker = null; // Tesseract-Worker (wird beim ersten Scan geladen)
 
   function uid() {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -439,179 +432,121 @@
     });
   }
 
-  // ---- IndexedDB für Karten-Bild-Hashes ----
-  function openHashIDB() {
-    return new Promise(function(resolve, reject) {
-      var req = indexedDB.open(HASH_DB_NAME, 1);
-      req.onupgradeneeded = function(e) { e.target.result.createObjectStore(HASH_STORE, { keyPath: "id" }); };
-      req.onsuccess = function(e) { resolve(e.target.result); };
-      req.onerror   = function(e) { reject(e.target.error); };
+  // ---- Texterkennung: TextDetector (nativ) + Tesseract Fallback ----
+
+  function getOCRWorker() {
+    if (_ocrWorker) return Promise.resolve(_ocrWorker);
+    if (typeof Tesseract === "undefined") return Promise.reject(new Error("Tesseract nicht geladen"));
+    return Tesseract.createWorker("eng").then(function(w) {
+      return w.setParameters({
+        tessedit_char_whitelist: "0123456789/*",
+        tessedit_pageseg_mode: "7"
+      }).then(function() { _ocrWorker = w; return w; });
     });
   }
 
-  function loadHashesFromIDB() {
-    return openHashIDB().then(function(db) {
-      return new Promise(function(resolve, reject) {
-        var req = db.transaction(HASH_STORE, "readonly").objectStore(HASH_STORE).getAll();
-        req.onsuccess = function(e) {
-          cardHashDB = {};
-          (e.target.result || []).forEach(function(row) { cardHashDB[row.id] = new Float32Array(row.hash); });
-          resolve(Object.keys(cardHashDB).length);
-        };
-        req.onerror = function(e) { reject(e.target.error); };
-      });
-    });
+  function cropAndScale(src, x, y, w, h, scale) {
+    var out = document.createElement("canvas");
+    out.width = Math.max(1, Math.round(w * scale));
+    out.height = Math.max(1, Math.round(h * scale));
+    var ctx = out.getContext("2d");
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(src, x, y, w, h, 0, 0, out.width, out.height);
+    return out;
   }
 
-  function saveHashBatch(db, entries) {
-    return new Promise(function(resolve) {
-      try {
-        var tx = db.transaction(HASH_STORE, "readwrite");
-        var store = tx.objectStore(HASH_STORE);
-        entries.forEach(function(e) { store.put(e); });
-        tx.oncomplete = resolve; tx.onerror = resolve;
-      } catch(e) { resolve(); }
-    });
-  }
-
-  function computeColorGrid(source, sx, sy, sw, sh) {
-    var c = document.createElement("canvas");
-    c.width = HASH_SIZE; c.height = HASH_SIZE;
-    var ctx = c.getContext("2d");
-    ctx.drawImage(source, sx, sy, sw, sh, 0, 0, HASH_SIZE, HASH_SIZE);
-    var d = ctx.getImageData(0, 0, HASH_SIZE, HASH_SIZE).data;
-    var grid = new Float32Array(HASH_SIZE * HASH_SIZE * 3);
-    for (var i = 0; i < HASH_SIZE * HASH_SIZE; i++) {
-      grid[i*3] = d[i*4]/255; grid[i*3+1] = d[i*4+1]/255; grid[i*3+2] = d[i*4+2]/255;
+  function binarize(canvas, invert) {
+    var out = document.createElement("canvas");
+    out.width = canvas.width; out.height = canvas.height;
+    var ctx = out.getContext("2d");
+    ctx.drawImage(canvas, 0, 0);
+    var id = ctx.getImageData(0, 0, out.width, out.height);
+    var d = id.data, sum = 0, px = d.length / 4;
+    for (var i = 0; i < d.length; i += 4) {
+      var g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+      d[i]=d[i+1]=d[i+2]=g; sum+=g;
     }
-    return grid;
-  }
-
-  function cosineSim(a, b) {
-    var dot = 0, na = 0, nb = 0;
-    for (var i = 0; i < a.length; i++) { dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
-    return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-9);
-  }
-
-  function updateHashStatus(errMsg) {
-    var el = document.getElementById("hash-build-status");
-    if (!el) return;
-    var n = cardHashDB ? Object.keys(cardHashDB).length : 0;
-    if (errMsg) {
-      el.innerHTML = escapeHtml(errMsg) + ' <button type="button" onclick="retryHashBuild()" style="background:#C9A24B;color:#1A1710;border:none;border-radius:6px;padding:3px 8px;font-size:11px;font-weight:700;cursor:pointer;">Neu starten</button>';
-      el.style.color = "#E07070";
-    } else if (hashBuildActive) {
-      el.textContent = "Bilder laden … " + hashBuildDone + "/" + hashBuildTotal + (hashBuildTotal > 0 ? " (" + Math.round(hashBuildDone/hashBuildTotal*100) + "%)" : "") + " — bitte warten";
-      el.style.color = "#C9A24B";
-    } else if (n > 0) {
-      el.textContent = "Bildabgleich bereit — " + n + " Karten";
-      el.style.color = "#6FCF8F";
-    } else {
-      el.textContent = "Bildabgleich wird gestartet …";
-      el.style.color = "#8A8270";
+    var avg = sum / px;
+    for (var i = 0; i < d.length; i += 4) {
+      var v = d[i] > avg ? 255 : 0;
+      d[i]=d[i+1]=d[i+2]= invert ? 255-v : v;
     }
+    ctx.putImageData(id, 0, 0);
+    return out;
   }
 
-  function retryHashBuild() {
-    hashBuildActive = false;
-    buildHashDatabase();
+  function parseCardNumber(text) {
+    // O→0, l/I→1 für typische OCR-Fehler bei Ziffern
+    var t = (text || "").replace(/\s/g, "")
+      .replace(/[oO]/g, "0").replace(/[lLI|]/g, "1");
+    var m = t.match(/(\d{1,4})[*]?\/(\d{1,4})/);
+    return m ? m[1] + "/" + m[2] : null;
   }
 
-  function buildHashDatabase() {
-    if (hashBuildActive) return Promise.resolve();
-    hashBuildActive = true;
-    updateHashStatus();
-
-    var rcPromise = loadRiftcodexCache().catch(function() { return []; });
-    var idbPromise = loadHashesFromIDB().catch(function() { cardHashDB = cardHashDB || {}; return 0; });
-
-    return Promise.all([rcPromise, idbPromise]).then(function(res) {
-      var allCards = res[0];
-      if (!allCards || allCards.length === 0) {
-        hashBuildActive = false;
-        updateHashStatus("Riftcodex nicht erreichbar — Internetverbindung prüfen");
-        return;
-      }
-      var cardsToProcess = allCards.filter(function(c) {
-        return c.imageUrl && !(cardHashDB && cardHashDB[c.riftcodexId]);
-      });
-      hashBuildTotal = allCards.filter(function(c) { return c.imageUrl; }).length;
-      hashBuildDone  = hashBuildTotal - cardsToProcess.length;
-      updateHashStatus();
-      if (cardsToProcess.length === 0) { hashBuildActive = false; updateHashStatus(); return; }
-
-      return openHashIDB().catch(function() { return null; }).then(function(db) {
-        var BATCH = 3, idx = 0;
-        function nextBatch() {
-          if (idx >= cardsToProcess.length) { hashBuildActive = false; updateHashStatus(); return; }
-          var batch = cardsToProcess.slice(idx, idx + BATCH); idx += BATCH;
-          var dbEntries = [];
-          return Promise.all(batch.map(function(card) {
-            var src = WSRV + card.imageUrl.replace("https://", "") + "&w=30&h=42&fit=inside";
-            return new Promise(function(resolve) {
-              var img = new Image(); img.crossOrigin = "anonymous";
-              var timer = setTimeout(function() { hashBuildDone++; updateHashStatus(); resolve(); }, 10000);
-              img.onload = function() {
-                clearTimeout(timer);
-                try {
-                  var iw = img.naturalWidth, ih = img.naturalHeight;
-                  var grid = computeColorGrid(img,
-                    Math.floor(iw*0.05), Math.floor(ih*0.15),
-                    Math.floor(iw*0.90), Math.floor(ih*0.57));
-                  if (!cardHashDB) cardHashDB = {};
-                  cardHashDB[card.riftcodexId] = grid;
-                  dbEntries.push({ id: card.riftcodexId, hash: Array.from(grid) });
-                } catch(e) { /* tainted canvas – skip */ }
-                hashBuildDone++; updateHashStatus(); resolve();
-              };
-              img.onerror = function() { clearTimeout(timer); hashBuildDone++; updateHashStatus(); resolve(); };
-              img.src = src;
-            });
-          })).then(function() {
-            if (db && dbEntries.length) return saveHashBatch(db, dbEntries);
-          }).then(nextBatch);
+  // Liest Kartennummer aus einem Canvas-Ausschnitt
+  // Versucht zuerst nativen TextDetector (Chrome/Android), dann Tesseract
+  function readNumberFromCrop(canvas, x, y, w, h) {
+    if (typeof TextDetector !== "undefined") {
+      var crop = cropAndScale(canvas, x, y, w, h, 3);
+      return new TextDetector().detect(crop).then(function(texts) {
+        for (var i = 0; i < texts.length; i++) {
+          var n = parseCardNumber(texts[i].rawValue);
+          if (n) return n;
         }
-        return nextBatch();
+        return null;
+      }).catch(function() { return null; }).then(function(n) {
+        return n || readNumberTesseract(canvas, x, y, w, h);
       });
-    }).catch(function(e) { hashBuildActive = false; updateHashStatus("Fehler beim Laden: " + (e.message || e)); });
+    }
+    return readNumberTesseract(canvas, x, y, w, h);
   }
 
-  function identifyCardByColor(imageUrl) {
+  function readNumberTesseract(canvas, x, y, w, h) {
+    if (typeof Tesseract === "undefined") return Promise.resolve(null);
+    var attempts = [
+      binarize(cropAndScale(canvas, x, y, w, h, 5), false),
+      binarize(cropAndScale(canvas, x, y, w, h, 5), true),
+      binarize(cropAndScale(canvas, x, y, w, h, 6), false)
+    ];
+    return getOCRWorker().then(function(worker) {
+      function next(i) {
+        if (i >= attempts.length) return null;
+        return worker.recognize(attempts[i]).then(function(r) {
+          return parseCardNumber(r.data.text) || next(i + 1);
+        });
+      }
+      return next(0);
+    }).catch(function() { return null; });
+  }
+
+  function identifyCardOCR(imageUrl) {
     return new Promise(function(resolve, reject) {
       var img = new Image();
       img.onload = function() {
-        var w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
-        if (!w || !h) { reject(new Error("Bild konnte nicht geladen werden")); return; }
-        var n = cardHashDB ? Object.keys(cardHashDB).length : 0;
-        if (n < 10) {
-          resolve({ game: "riftbound", name: "", number: "", confidence: "low",
-            notes: "Bildabgleich lädt noch (" + n + "/" + hashBuildTotal + ") — kurz warten und erneut scannen" });
-          return;
-        }
+        var W = img.naturalWidth || img.width;
+        var H = img.naturalHeight || img.height;
+        if (!W || !H) { reject(new Error("Bild nicht ladbar")); return; }
         var canvas = document.createElement("canvas");
-        canvas.width = w; canvas.height = h;
+        canvas.width = W; canvas.height = H;
         canvas.getContext("2d").drawImage(img, 0, 0);
-        // Bildbereich der Karte: Guide top=12%, Höhe=76%; davon Artwork 15%-72%
-        var guideTop = h * 0.12, guideH = h * 0.76;
-        var artY = Math.floor(guideTop + guideH * 0.15);
-        var artH = Math.floor(guideH * 0.57);
-        var artX = Math.floor(w * 0.15);
-        var artW = Math.floor(w * 0.70);
-        var grid;
-        try { grid = computeColorGrid(canvas, artX, artY, artW, artH); }
-        catch(e) { reject(new Error("Bild-Analyse fehlgeschlagen")); return; }
-        var top = [];
-        Object.keys(cardHashDB).forEach(function(id) {
-          top.push({ id: id, score: cosineSim(grid, cardHashDB[id]) });
-        });
-        top.sort(function(a, b) { return b.score - a.score; });
-        top = top.slice(0, 8);
-        var best = top[0] ? top[0].score : 0;
-        resolve({
-          game: "riftbound", name: "", number: "",
-          colorMatchIds: top.map(function(m) { return m.id; }),
-          topScore: best,
-          confidence: best > 0.93 ? "high" : best > 0.83 ? "medium" : "low"
+
+        // Kartennummer: untere ~10% des Guide-Rechtecks (Guide: top 12%, bottom 88%)
+        var gH = Math.floor(H * 0.76);
+        var gBottom = Math.floor(H * 0.88);
+        var numH = Math.floor(gH * 0.10);
+        var numX = Math.floor(W * 0.20);
+        var numW = Math.floor(W * 0.60);
+        var numY1 = gBottom - numH - Math.floor(gH * 0.01);  // dicht am Boden
+        var numY2 = numY1 - numH;                             // eine Zeile höher
+
+        readNumberFromCrop(canvas, numX, numY1, numW, numH).then(function(n) {
+          return n || readNumberFromCrop(canvas, numX, numY2, numW, numH);
+        }).then(function(number) {
+          resolve({
+            game: "riftbound", name: "", number: number || "",
+            confidence: number ? "medium" : "low",
+            notes: number ? "" : "Nummer nicht lesbar — Karte schärfer halten"
+          });
         });
       };
       img.onerror = function() { reject(new Error("Bild konnte nicht geladen werden")); };
@@ -724,7 +659,9 @@
     });
   }
 
-  function addToQueue(file) {
+  // preResult ist optional – wird vom Live-Scan übergeben wenn die Nummer
+  // schon per OCR auf dem Canvas gelesen wurde (spart doppelte Erkennung)
+  function addToQueue(file, preResult) {
     if (!file) return;
     var previewUrl = URL.createObjectURL(file);
     var entryId = uid();
@@ -738,56 +675,54 @@
     });
     renderQueue();
 
-    identifyCardByColor(previewUrl).then(function (result) {
-      var foilValue = foilMode === "foilOnly" ? true : foilMode === "nonFoilOnly" ? false : false;
+    var resultPromise = preResult
+      ? Promise.resolve(preResult)
+      : identifyCardOCR(previewUrl);
 
-      var candidatesPromise = Promise.resolve([]);
-      if (result.colorMatchIds && result.colorMatchIds.length > 0) {
-        candidatesPromise = loadRiftcodexCache().then(function (cache) {
-          return result.colorMatchIds
-            .map(function (id) { return cache.find(function (c) { return c.riftcodexId === id; }); })
-            .filter(function (c) { return !!c; });
-        });
-      }
+    resultPromise.then(function (result) {
+      var foilValue = foilMode === "foilOnly" ? true : foilMode === "nonFoilOnly" ? false : false;
+      var candidatesPromise = result.number
+        ? searchRiftboundByNumber(result.number).catch(function () { return []; })
+        : Promise.resolve([]);
 
       return candidatesPromise.then(function (candidates) {
         if (candidates.length > 1) {
           candidates = candidates.slice().sort(function (a, b) {
-            var scoreA = 0, scoreB = 0;
-            if (specialFilters.overnumber) { scoreA += a.isOvernumbered ? 1 : 0; scoreB += b.isOvernumbered ? 1 : 0; }
-            if (specialFilters.altArt) { scoreA += a.isAltArt ? 1 : 0; scoreB += b.isAltArt ? 1 : 0; }
-            if (specialFilters.promo) { scoreA += a.isPromo ? 1 : 0; scoreB += b.isPromo ? 1 : 0; }
-            return scoreB - scoreA;
+            var sA = 0, sB = 0;
+            if (specialFilters.overnumber) { sA += a.isOvernumbered ? 1 : 0; sB += b.isOvernumbered ? 1 : 0; }
+            if (specialFilters.altArt)     { sA += a.isAltArt ? 1 : 0;      sB += b.isAltArt ? 1 : 0; }
+            if (specialFilters.promo)      { sA += a.isPromo ? 1 : 0;       sB += b.isPromo ? 1 : 0; }
+            return sB - sA;
           });
         }
-        var hasCandidates = candidates.length > 0;
         var entry = queue.filter(function (e) { return e.id === entryId; })[0];
         if (entry) {
-          if (!hasCandidates) {
+          if (candidates.length === 0) {
             entry.status = "error";
-            entry.errorMessage = result.notes || "Karte nicht erkannt — Karte schärfer ins Bild halten oder ✎ manuell eintragen";
+            entry.errorMessage = result.number
+              ? "Nummer " + result.number + " nicht in Riftcodex — ✎ manuell"
+              : "Nummer nicht lesbar — ✎ manuell eintragen";
           } else {
             entry.status = "needs_selection";
           }
           entry.game = "riftbound";
-          entry.name = ""; entry.set = ""; entry.number = ""; entry.rarity = "";
+          entry.name = ""; entry.set = ""; entry.number = result.number || ""; entry.rarity = "";
           entry.foil = foilValue; entry.language = "EN";
-          entry.notes = result.notes || "";
           entry.confidence = result.confidence || "medium";
           entry.candidates = candidates;
           entry.selectedCandidate = null; entry.cardImageUrl = ""; entry.uncertainFields = [];
         }
         renderQueue();
+        liveBusy = false;
+        setLiveStatusPill("Karte ruhig vor die Kamera halten", false);
       });
     }).catch(function (e) {
       console.error(e);
       var entry = queue.filter(function (en) { return en.id === entryId; })[0];
-      if (entry) {
-        entry.status = "error";
-        entry.confidence = "low";
-        entry.errorMessage = e.message || "Unbekannter Fehler";
-      }
+      if (entry) { entry.status = "error"; entry.confidence = "low"; entry.errorMessage = e.message || "Fehler"; }
       renderQueue();
+      liveBusy = false;
+      setLiveStatusPill("Karte ruhig vor die Kamera halten", false);
     });
   }
 
@@ -924,34 +859,6 @@
     pill.classList.toggle("capturing", !!capturing);
   }
 
-  // Schwellwert ab dem eine Karte als "erkannt" gilt (0–1 Cosine-Ähnlichkeit)
-  var DETECT_THRESHOLD = 0.79;
-
-  function analyzeCanvasFrame(canvas) {
-    if (!cardHashDB || Object.keys(cardHashDB).length < 10) return null;
-    var w = canvas.width, h = canvas.height;
-    var guideTop = h * 0.12, guideH = h * 0.76;
-    var artY = Math.floor(guideTop + guideH * 0.15);
-    var artH = Math.floor(guideH * 0.57);
-    var artX = Math.floor(w * 0.15);
-    var artW = Math.floor(w * 0.70);
-    var grid;
-    try { grid = computeColorGrid(canvas, artX, artY, artW, artH); }
-    catch(e) { return null; }
-    var top = [];
-    Object.keys(cardHashDB).forEach(function(id) {
-      top.push({ id: id, score: cosineSim(grid, cardHashDB[id]) });
-    });
-    top.sort(function(a, b) { return b.score - a.score; });
-    top = top.slice(0, 8);
-    var best = top[0] ? top[0].score : 0;
-    return {
-      colorMatchIds: top.map(function(m) { return m.id; }),
-      topScore: best,
-      confidence: best > 0.93 ? "high" : best > 0.83 ? "medium" : "low"
-    };
-  }
-
   function captureLiveFrame() {
     if (liveBusy) return;
     var video = document.getElementById("live-video");
@@ -963,77 +870,33 @@
     canvas.height = video.videoHeight;
     canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    var result = analyzeCanvasFrame(canvas);
-    var n = cardHashDB ? Object.keys(cardHashDB).length : 0;
+    setLiveStatusPill("Lese Nummer …", true);
 
-    if (!result) {
-      setLiveStatusPill("Bildabgleich lädt … " + n + "/" + hashBuildTotal, false);
-      liveBusy = false;
-      return;
-    }
+    // OCR direkt auf Canvas (kein Blob nötig für die Erkennung)
+    var W = canvas.width, H = canvas.height;
+    var gH = Math.floor(H * 0.76), gBottom = Math.floor(H * 0.88);
+    var numH = Math.floor(gH * 0.10);
+    var numX = Math.floor(W * 0.20), numW = Math.floor(W * 0.60);
+    var numY1 = gBottom - numH - Math.floor(gH * 0.01);
+    var numY2 = numY1 - numH;
 
-    var pct = Math.round(result.topScore * 100);
-    if (result.topScore < DETECT_THRESHOLD) {
-      setLiveStatusPill("Kein Treffer · " + pct + "% — Karte näher halten", false);
-      liveBusy = false;
-      return;
-    }
-
-    setLiveStatusPill("Karte erkannt · " + pct + "% — wird hinzugefügt …", true);
-    canvas.toBlob(function (blob) {
-      if (blob) {
+    readNumberFromCrop(canvas, numX, numY1, numW, numH).then(function(n) {
+      return n || readNumberFromCrop(canvas, numX, numY2, numW, numH);
+    }).then(function(number) {
+      if (!number) {
+        setLiveStatusPill("Keine Nummer erkannt — Karte ruhig halten", false);
+        liveBusy = false;
+        return;
+      }
+      setLiveStatusPill("Nummer erkannt: " + number, true);
+      canvas.toBlob(function(blob) {
+        if (!blob) { liveBusy = false; return; }
         var file = new File([blob], "live-" + Date.now() + ".jpg", { type: "image/jpeg" });
-        addToQueuePreanalyzed(file, result);
-      }
+        addToQueue(file, { number: number });
+      }, "image/jpeg", 0.92);
+    }).catch(function() {
+      setLiveStatusPill("Karte ruhig vor die Kamera halten", false);
       liveBusy = false;
-    }, "image/jpeg", 0.9);
-  }
-
-  function addToQueuePreanalyzed(file, preResult) {
-    var previewUrl = URL.createObjectURL(file);
-    var entryId = uid();
-    queue.push({
-      id: entryId, status: "analyzing", previewUrl: previewUrl, cardImageUrl: "",
-      game: "riftbound", name: "", set: "", number: "", rarity: "",
-      foil: foilMode === "foilOnly", language: "EN", condition: "Near Mint",
-      quantity: 1, notes: "", confidence: preResult.confidence || "medium",
-      candidates: [], selectedCandidate: null, uncertainFields: [],
-      matchScore: preResult.topScore
-    });
-    renderQueue();
-
-    var foilValue = foilMode === "foilOnly" ? true : foilMode === "nonFoilOnly" ? false : false;
-    var candidatesPromise = Promise.resolve([]);
-    if (preResult.colorMatchIds && preResult.colorMatchIds.length > 0) {
-      candidatesPromise = loadRiftcodexCache().then(function(cache) {
-        return preResult.colorMatchIds
-          .map(function(id) { return cache.find(function(c) { return c.riftcodexId === id; }); })
-          .filter(function(c) { return !!c; });
-      });
-    }
-    candidatesPromise.then(function(candidates) {
-      if (candidates.length > 1) {
-        candidates = candidates.slice().sort(function(a, b) {
-          var sA = 0, sB = 0;
-          if (specialFilters.overnumber) { sA += a.isOvernumbered ? 1 : 0; sB += b.isOvernumbered ? 1 : 0; }
-          if (specialFilters.altArt)     { sA += a.isAltArt ? 1 : 0;      sB += b.isAltArt ? 1 : 0; }
-          if (specialFilters.promo)      { sA += a.isPromo ? 1 : 0;       sB += b.isPromo ? 1 : 0; }
-          return sB - sA;
-        });
-      }
-      var entry = queue.filter(function(e) { return e.id === entryId; })[0];
-      if (entry) {
-        entry.status = candidates.length > 0 ? "needs_selection" : "error";
-        if (candidates.length === 0) entry.errorMessage = "Keine passende Karte gefunden — ✎ manuell eintragen";
-        entry.foil = foilValue;
-        entry.candidates = candidates;
-        entry.matchScore = preResult.topScore;
-      }
-      renderQueue();
-    }).catch(function(e) {
-      var entry = queue.filter(function(en) { return en.id === entryId; })[0];
-      if (entry) { entry.status = "error"; entry.errorMessage = e.message || "Fehler"; }
-      renderQueue();
     });
   }
 
@@ -1380,8 +1243,20 @@
       document.getElementById("api-key-overlay").classList.remove("hidden");
     };
 
-    // Kartenbilder einmalig herunterladen und als Farb-Fingerabdrücke in IndexedDB speichern
-    buildHashDatabase();
+    // Riftcodex-Kartenliste im Hintergrund laden
+    loadRiftcodexCache();
+    // OCR-Engine vorwärmen (verhindert Verzögerung beim ersten Scan)
+    var ocrStatus = document.getElementById("ocr-engine-status");
+    if (typeof TextDetector !== "undefined") {
+      if (ocrStatus) { ocrStatus.textContent = "Nativer TextDetector verfügbar ✓"; ocrStatus.style.color = "#6FCF8F"; }
+    } else if (typeof Tesseract !== "undefined") {
+      if (ocrStatus) { ocrStatus.textContent = "Tesseract lädt …"; ocrStatus.style.color = "#C9A24B"; }
+      getOCRWorker().then(function() {
+        if (ocrStatus) { ocrStatus.textContent = "Tesseract bereit ✓"; ocrStatus.style.color = "#6FCF8F"; }
+      }).catch(function() {
+        if (ocrStatus) { ocrStatus.textContent = "Tesseract konnte nicht geladen werden"; ocrStatus.style.color = "#E07070"; }
+      });
+    }
 
     document.getElementById("live-scan-start-btn").onclick = startLiveScan;
     document.getElementById("live-scan-stop-btn").onclick = stopLiveScan;
