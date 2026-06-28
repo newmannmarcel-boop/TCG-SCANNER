@@ -577,12 +577,15 @@
     function lo20() { return _lo20 || (_lo20 = cropAndScale(canvas, 0, Math.floor(H * 0.78), W, Math.floor(H * 0.20), scHigh)); }
     function lo10() { return _lo10 || (_lo10 = cropAndScale(canvas, 0, Math.floor(H * 0.88), W, Math.floor(H * 0.10), scHigh)); }
 
-    // Nur 4 Versuche statt 9 → bei Misserfolg trotzdem ~50% schneller
+    // 6 Versuche — die häufigsten Erfolgs-Varianten zuerst.
+    // Lazy build: jeder Crop wird nur erzeugt wenn der Versuch tatsächlich dran ist
     var attempts = [
-      { make: function() { return toGrayscale(lo20()); }, psm: "7"  },
-      { make: function() { return toGrayscale(lo10()); }, psm: "7"  },
-      { make: function() { return binarize(lo20(), false); }, psm: "7"  },
-      { make: function() { return toGrayscale(lo50()); }, psm: "11" }
+      { make: function() { return toGrayscale(lo20()); },        psm: "7"  },
+      { make: function() { return toGrayscale(lo10()); },        psm: "7"  },
+      { make: function() { return binarize(lo20(), false); },    psm: "7"  },
+      { make: function() { return binarize(lo10(), true);  },    psm: "7"  }, // helle Schrift auf dunklem Karten-Footer
+      { make: function() { return adaptiveThreshold(lo20()); },  psm: "7"  },
+      { make: function() { return toGrayscale(lo50()); },        psm: "11" }
     ];
     return getOCRWorker().then(function(worker) {
       function next(i) {
@@ -944,18 +947,16 @@
       return;
     }
     // Höchstmögliche Auflösung anfordern — moderne Handys liefern 1080p–4K
-    // Der Browser wählt automatisch das beste Match das die Kamera kann
+    // Der Browser wählt automatisch das beste Match das die Kamera kann.
+    // KEINE expliziten focus/whiteBalance/exposure-Constraints — Browser-Default
+    // ist auf Android Chrome bereits "continuous", explizite Constraints haben
+    // auf manchen Geräten den AF in einen schlechteren Modus gezwungen.
     navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: "environment",
-        width:  { ideal: 3840 },   // 4K Breite — Browser kappt auf max der Kamera
+        width:  { ideal: 3840 },
         height: { ideal: 2160 },
-        frameRate: { ideal: 30 },
-        advanced: [
-          { focusMode: "continuous" },
-          { whiteBalanceMode: "continuous" },
-          { exposureMode:    "continuous" }
-        ]
+        frameRate: { ideal: 30 }
       },
       audio: false
     }).then(function (stream) {
