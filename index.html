@@ -906,13 +906,33 @@
       showLiveError("Dieser Browser unterstützt keinen Kamera-Zugriff über getUserMedia. Nutze stattdessen Foto/Galerie unten.");
       return;
     }
+    // Höchstmögliche Auflösung anfordern — moderne Handys liefern 1080p–4K
+    // Der Browser wählt automatisch das beste Match das die Kamera kann
     navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "environment", width: { ideal: 720 }, height: { ideal: 960 } },
+      video: {
+        facingMode: "environment",
+        width:  { ideal: 3840 },   // 4K Breite — Browser kappt auf max der Kamera
+        height: { ideal: 2160 },
+        frameRate: { ideal: 30 },
+        advanced: [
+          { focusMode: "continuous" },
+          { whiteBalanceMode: "continuous" },
+          { exposureMode:    "continuous" }
+        ]
+      },
       audio: false
     }).then(function (stream) {
       liveStream = stream;
       var video = document.getElementById("live-video");
       video.srcObject = stream;
+
+      // Tatsächliche Auflösung in Konsole loggen — hilft beim Debuggen
+      var track = stream.getVideoTracks()[0];
+      if (track && track.getSettings) {
+        var s = track.getSettings();
+        console.log("[Kamera] aktiv:", s.width + "×" + s.height + "@" + (s.frameRate||"?") + "fps",
+                    "Fokus:", s.focusMode || "auto");
+      }
 
       // Wenn der Kamera-Track von außen beendet wird (z.B. Anruf kommt rein,
       // eine andere App übernimmt die Kamera, Nutzer entzieht die Berechtigung
