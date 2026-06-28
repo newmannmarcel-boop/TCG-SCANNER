@@ -153,6 +153,14 @@
     padding: 3px 7px; border-radius: 6px; letter-spacing: 0.3px; pointer-events: none;
     font-variant-numeric: tabular-nums;
   }
+  .live-torch-btn {
+    position: absolute; bottom: 8px; right: 8px;
+    background: rgba(0,0,0,0.6); color: #EDE7D9; font-size: 11px; font-weight: 600;
+    padding: 6px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.15);
+    cursor: pointer; letter-spacing: 0.3px;
+  }
+  .live-torch-btn.on { background: rgba(201,162,75,0.85); color: #1A1710; border-color: rgba(201,162,75,1); }
+  .live-torch-btn.hidden { display: none; }
   .live-frame-guide {
     /* TCG-Karte 63×88mm = 1.4:1 — Im 3:4-Container: Breite 72% → Höhe ≈ 76% → AR=1.41 */
     position: absolute; top: 12%; left: 14%; right: 14%; bottom: 12%;
@@ -275,6 +283,7 @@
         <span class="live-status-pill" id="live-status-pill">Karte ruhig vor die Kamera halten</span>
       </div>
       <div class="live-cam-info" id="live-cam-info">— × —</div>
+      <button type="button" id="live-torch-btn" class="live-torch-btn hidden">Blitz an</button>
       <div class="live-frame-guide"></div>
     </div>
     <button type="button" id="live-scan-stop-btn" class="btn-secondary focus-ring" style="width: 100%;">✕ Live-Scan beenden</button>
@@ -365,6 +374,8 @@
   var liveInterval = null;
   var liveBusy = false;
   var liveCameraBlocked = false;
+  var liveTorchTrack = null;
+  var liveTorchOn = false;
 
   var riftcodexCache = null;
   var riftcodexCachePromise = null;
@@ -975,6 +986,22 @@
         if (infoEl) infoEl.textContent = info;
       }
 
+      // Taschenlampe nur anbieten wenn die Kamera sie wirklich unterstützt
+      // (Android Chrome ja, iOS Safari nein, manche Frontkameras nein)
+      liveTorchTrack = track;
+      liveTorchOn = false;
+      var torchBtn = document.getElementById("live-torch-btn");
+      var caps = track && track.getCapabilities ? track.getCapabilities() : null;
+      if (torchBtn) {
+        if (caps && caps.torch) {
+          torchBtn.classList.remove("hidden");
+          torchBtn.classList.remove("on");
+          torchBtn.textContent = "Blitz an";
+        } else {
+          torchBtn.classList.add("hidden");
+        }
+      }
+
       // Wenn der Kamera-Track von außen beendet wird (z.B. Anruf kommt rein,
       // eine andere App übernimmt die Kamera, Nutzer entzieht die Berechtigung
       // nachträglich), merkt die App das jetzt aktiv und zeigt es klar an,
@@ -1039,9 +1066,27 @@
     if (liveInterval) { clearInterval(liveInterval); liveInterval = null; }
     if (liveStream) { liveStream.getTracks().forEach(function (t) { t.stop(); }); liveStream = null; }
     liveActive = false;
+    liveTorchTrack = null; liveTorchOn = false;
+    var tb = document.getElementById("live-torch-btn");
+    if (tb) { tb.classList.add("hidden"); tb.classList.remove("on"); tb.textContent = "Blitz an"; }
     document.getElementById("live-video-section").classList.add("hidden");
     if (!liveCameraBlocked) document.getElementById("live-scan-start-btn").classList.remove("hidden");
     setLiveStatusPill("Karte ruhig vor die Kamera halten", false);
+  }
+
+  function toggleTorch() {
+    if (!liveTorchTrack || !liveTorchTrack.applyConstraints) return;
+    var next = !liveTorchOn;
+    liveTorchTrack.applyConstraints({ advanced: [{ torch: next }] }).then(function () {
+      liveTorchOn = next;
+      var btn = document.getElementById("live-torch-btn");
+      if (btn) {
+        btn.classList.toggle("on", next);
+        btn.textContent = next ? "Blitz aus" : "Blitz an";
+      }
+    }).catch(function (err) {
+      console.warn("[Blitz] nicht möglich:", err);
+    });
   }
 
   function setLiveStatusPill(text, capturing) {
@@ -1448,6 +1493,7 @@
 
     document.getElementById("live-scan-start-btn").onclick = startLiveScan;
     document.getElementById("live-scan-stop-btn").onclick = stopLiveScan;
+    document.getElementById("live-torch-btn").onclick = toggleTorch;
 
     function handleFiles(fileList) {
       Array.prototype.slice.call(fileList || []).forEach(function (f) { addToQueue(f); });
