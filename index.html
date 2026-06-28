@@ -210,6 +210,7 @@
 
   details > summary { font-size: 11px; color: #6B6452; cursor: pointer; }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
 
@@ -252,7 +253,7 @@
       <button type="button" class="mode-btn focus-ring" data-filter="altArt">Alt Art</button>
       <button type="button" class="mode-btn focus-ring" data-filter="promo">Promo</button>
     </div>
-    <p class="source-note">Riftbound-Kartenbilder und Daten kommen live von Riftcodex.com — einem inoffiziellen Fan-Projekt, nicht von Riot Games selbst. Bitte trotzdem kurz prüfen.</p>
+    <p class="source-note">Erkennung läuft lokal per OCR (liest die Kartennummer vom Foto). Beim ersten Scan lädt der OCR-Motor kurz nach (~5 Sek). Kartenbilder und Daten kommen von Riftcodex.com — bitte Ergebnis kurz prüfen.</p>
   </div>
 
   <button type="button" id="live-scan-start-btn" class="btn-primary focus-ring" style="width: 100%; padding: 14px 16px; font-size: 14px; margin-bottom: 10px;">
@@ -356,6 +357,10 @@
   var liveBusy = false;
   var liveCameraBlocked = false;
 
+  var riftcodexCache = null;
+  var riftcodexCachePromise = null;
+  var STORAGE_KEY_RCACHE = "kartenkammer_riftcodex_v2";
+
   function uid() {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   }
@@ -424,62 +429,150 @@
     });
   }
 
-  function identifyCard(base64, mediaType) {
-    var prompt = "Du bist ein Experte für Trading Card Games: Riftbound (League of Legends TCG), One Piece TCG, Pokémon TCG und Magic: The Gathering.\n\n" +
-      "Analysiere das Foto einer einzelnen Karte. Diese Karten werden für ein Geschäft erfasst, wo falsche Werteinschätzungen echtes Geld kosten können (z.B. eine normale Karte vs. eine seltene Signature/Alt-Art-Variante derselben Nummer mit einem kleinen Stern * dahinter kann einen Preisunterschied von wenigen Cent zu mehreren hundert Euro bedeuten). Sei deshalb ehrlich unsicher bei Details, die du nicht klar und zweifelsfrei auf dem Foto erkennen kannst - rate NICHT, wenn ein Detail unscharf, verdeckt, zu klein oder durch Reflexion/Licht nicht eindeutig lesbar ist.\n\n" +
-      "Antworte AUSSCHLIESSLICH mit einem JSON-Objekt, keine Erklärung, kein Markdown, keine Backticks. Format exakt so:\n" +
-      "{\n" +
-      '  "game": "riftbound" | "onepiece" | "pokemon" | "mtg" | "unknown",\n' +
-      '  "name": "Kartenname",\n' +
-      '  "set": "Set-Name oder Set-Kürzel",\n' +
-      '  "number": "Sammlernummer so wie auf der Karte gedruckt, inkl. eventuellem Stern* oder anderen Sonderzeichen direkt hinter der Nummer - z.B. 045/298 oder 228*/219",\n' +
-      '  "rarity": "Seltenheit falls klar erkennbar, sonst leer",\n' +
-      '  "foil": true | false,\n' +
-      '  "language": "DE" | "EN" | "JP" | "FR" | "IT" | "ES" | "PT" | "KR" | "CN" | "",\n' +
-      '  "confidence": "high" | "medium" | "low",\n' +
-      '  "uncertain_fields": ["Liste der Felder, bei denen du nicht sicher bist, z.B. \\"number\\", \\"foil\\", \\"language\\", \\"rarity\\" - leeres Array wenn alles klar erkennbar war"],\n' +
-      '  "notes": "Kurzer Hinweis WARUM ein Feld unsicher ist, falls uncertain_fields nicht leer ist, sonst leer"\n' +
-      "}\n\n" +
-      "Wenn du das Spiel nicht zuordnen kannst, setze \"game\" auf \"unknown\". Wenn ein Feld nicht erkennbar ist, lasse es leer und trage es trotzdem in uncertain_fields ein. " +
-      "Besonders wichtig: Prüfe genau, ob direkt hinter der Sammlernummer ein kleiner Stern (*) oder ein anderes Sonderzeichen steht - das markiert oft eine wertvollere Variante (Signature/Secret Rare/Alt Art) derselben Nummer. Wenn du dir bei diesem Detail nicht zu 100% sicher bist, weil es zu klein, unscharf oder durch Glanz/Reflexion überdeckt ist, trage \"number\" in uncertain_fields ein, auch wenn der Rest der Nummer klar lesbar war.";
+  function cropAndPreprocess(canvas, x, y, w, h, scale) {
+    var out = document.createElement("canvas");
+    out.width = Math.max(1, Math.round(w * scale));
+    out.height = Math.max(1, Math.round(h * scale));
+    var ctx = out.getContext("2d");
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(canvas, x, y, w, h, 0, 0, out.width, out.height);
+    var id = ctx.getImageData(0, 0, out.width, out.height);
+    var d = id.data;
+    var sum = 0;
+    var px = d.length / 4;
+    for (var i = 0; i < d.length; i += 4) {
+      var g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      d[i] = d[i + 1] = d[i + 2] = g;
+      sum += g;
+    }
+    var avg = sum / px;
+    for (var i = 0; i < d.length; i += 4) {
+      d[i] = d[i + 1] = d[i + 2] = (d[i] > avg ? 255 : 0);
+    }
+    ctx.putImageData(id, 0, 0);
+    return out;
+  }
 
-    if (!apiKey) return Promise.reject(new Error("NO_API_KEY"));
+  function identifyCardOCR(imageUrl) {
+    return new Promise(function (resolve, reject) {
+      var img = new Image();
+      img.onload = function () {
+        var w = img.naturalWidth || img.width;
+        var h = img.naturalHeight || img.height;
+        if (!w || !h) { reject(new Error("Bild konnte nicht geladen werden")); return; }
 
-    return fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true"
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 1000,
-        messages: [{
-          role: "user",
-          content: [
-            { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
-            { type: "text", text: prompt }
-          ]
-        }]
-      })
-    }).then(function (response) {
-      if (!response.ok) {
-        return response.text().then(function (errText) {
-          throw new Error("Anthropic API Fehler (" + response.status + "): " + errText.slice(0, 200));
+        var main = document.createElement("canvas");
+        main.width = w; main.height = h;
+        main.getContext("2d").drawImage(img, 0, 0);
+
+        // Kartennummer: untere 16% des Bildes, mittlere 70%, 4x skaliert + Schwellwert
+        var cx = Math.floor(w * 0.15);
+        var cy = Math.floor(h * 0.78);
+        var cw = Math.floor(w * 0.70);
+        var ch = Math.floor(h * 0.16);
+        var numCanvas = cropAndPreprocess(main, cx, cy, cw, ch, 4);
+
+        if (typeof Tesseract === "undefined") {
+          reject(new Error("Tesseract nicht geladen — bitte Seite neu laden"));
+          return;
+        }
+
+        Tesseract.recognize(numCanvas, "eng").then(function (result) {
+          var text = (result.data.text || "").replace(/\s/g, "");
+          // Suche nach Muster wie 045/298 oder 228*/219 oder 228x/219
+          var match = text.match(/(\d{1,4})\s*([*xX]?)\s*\/\s*(\d{1,4})/);
+          var number = "";
+          var uncertain = [];
+
+          if (match) {
+            var base = match[1];
+            var raw = match[2];
+            // 'x' oder 'X' ist oft ein falsch erkanntes '*'
+            var hasStar = raw === "*";
+            var ambiguous = raw === "x" || raw === "X";
+            number = base + (hasStar || ambiguous ? "*" : "") + "/" + match[3];
+            if (ambiguous) uncertain.push("number"); // Stern war unklar (x statt *)
+          } else {
+            uncertain.push("number");
+          }
+
+          resolve({
+            game: "riftbound",
+            name: "",
+            set: "",
+            number: number,
+            rarity: "",
+            foil: false,
+            language: "EN",
+            confidence: number ? "medium" : "low",
+            uncertain_fields: uncertain,
+            notes: number ? "" : "Kartennummer konnte nicht gelesen werden"
+          });
+        }).catch(function (e) {
+          reject(new Error("OCR fehlgeschlagen: " + (e.message || e)));
         });
-      }
-      return response.json();
-    }).then(function (data) {
-      var textBlock = (data.content || []).filter(function (c) { return c.type === "text"; })[0];
-      if (!textBlock) throw new Error("Keine Antwort erhalten");
-      var cleaned = textBlock.text.trim();
-      var fence = String.fromCharCode(96, 96, 96);
-      if (cleaned.indexOf(fence) === 0) {
-        cleaned = cleaned.split(fence).join("").replace(/^json/i, "").trim();
-      }
-      return JSON.parse(cleaned);
+      };
+      img.onerror = function () { reject(new Error("Bild konnte nicht geladen werden")); };
+      img.src = imageUrl;
+    });
+  }
+
+  function loadRiftcodexCache() {
+    if (riftcodexCache) return Promise.resolve(riftcodexCache);
+    if (riftcodexCachePromise) return riftcodexCachePromise;
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY_RCACHE);
+      if (raw) { riftcodexCache = JSON.parse(raw); return Promise.resolve(riftcodexCache); }
+    } catch (e) {}
+    riftcodexCachePromise = fetch(RIFTCODEX_BASE + "/cards?size=2000")
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        riftcodexCache = (data.items || []).map(function (card) {
+          return {
+            riftcodexId: card.id,
+            name: card.name,
+            number: card.riftbound_id || "",
+            set: (card.set && card.set.label) || "",
+            setId: (card.set && card.set.set_id) || "",
+            rarity: (card.classification && card.classification.rarity) || "",
+            imageUrl: (card.media && card.media.image_url) || "",
+            isPromo: !!(card.set && card.set.set_id === "OPP"),
+            isAltArt: !!(card.metadata && card.metadata.alternate_art),
+            isOvernumbered: !!(card.metadata && card.metadata.overnumbered),
+            isSignature: !!(card.metadata && card.metadata.signature)
+          };
+        });
+        try { localStorage.setItem(STORAGE_KEY_RCACHE, JSON.stringify(riftcodexCache)); } catch (e) {}
+        riftcodexCachePromise = null;
+        return riftcodexCache;
+      })
+      .catch(function (e) {
+        riftcodexCachePromise = null;
+        return [];
+      });
+    return riftcodexCachePromise;
+  }
+
+  function searchRiftboundByNumber(number) {
+    if (!number) return Promise.resolve([]);
+    var m = number.match(/(\d+)(\*?)\/(\d+)/);
+    if (!m) return Promise.resolve([]);
+    var base = m[1];
+    var hasStar = m[2] === "*";
+    var total = m[3];
+    return loadRiftcodexCache().then(function (cache) {
+      var results = cache.filter(function (card) {
+        var cm = (card.number || "").match(/(\d+)(\*?)\/(\d+)/);
+        if (!cm) return false;
+        return cm[1] === base && cm[3] === total;
+      });
+      // Sortierung: Stern-Variante vorne wenn Stern erkannt, sonst normale vorne
+      results.sort(function (a, b) {
+        var aStar = (a.number || "").indexOf("*") !== -1 ? 1 : 0;
+        var bStar = (b.number || "").indexOf("*") !== -1 ? 1 : 0;
+        return hasStar ? bStar - aStar : aStar - bStar;
+      });
+      return results;
     });
   }
 
@@ -522,21 +615,15 @@
     });
     renderQueue();
 
-    fileToBase64(file).then(function (base64) {
-      var mediaType = file.type || "image/jpeg";
-      return identifyCard(base64, mediaType);
-    }).then(function (result) {
-      var foilValue = foilMode === "foilOnly" ? true : foilMode === "nonFoilOnly" ? false : !!result.foil;
-      if (foilMode !== "either" && result.confidence === "high") {
-        foilValue = !!result.foil;
-      }
-      var detectedGame = GAMES[result.game] ? result.game : "unknown";
+    identifyCardOCR(previewUrl).then(function (result) {
+      var foilValue = foilMode === "foilOnly" ? true : foilMode === "nonFoilOnly" ? false : false;
+      var detectedGame = "riftbound";
       var uncertainFields = Array.isArray(result.uncertain_fields) ? result.uncertain_fields : [];
 
       var candidatesPromise = Promise.resolve([]);
-      if (detectedGame === "riftbound" && result.name) {
-        candidatesPromise = searchRiftboundCards(result.name).catch(function (e) {
-          console.error("Riftcodex-Suche fehlgeschlagen", e);
+      if (result.number) {
+        candidatesPromise = searchRiftboundByNumber(result.number).catch(function (e) {
+          console.error("Riftcodex Nummern-Suche fehlgeschlagen", e);
           return [];
         });
       }
@@ -555,27 +642,29 @@
           });
         }
         var hasCandidates = candidates.length > 0;
-        var bestGuess = hasCandidates ? candidates[0] : null;
-        // Wenn die Nummer/Variante unsicher ist (z.B. Sternchen nicht eindeutig lesbar),
-        // wird IMMER eine manuelle Auswahl erzwungen - selbst bei nur einem Kandidaten -
-        // weil genau dieses Detail über den Kartenwert entscheiden kann.
         var numberUncertain = uncertainFields.indexOf("number") !== -1;
-        var forceSelection = detectedGame === "riftbound" && (hasCandidates || numberUncertain);
         var entry = queue.filter(function (e) { return e.id === entryId; })[0];
         if (entry) {
-          entry.status = forceSelection ? "needs_selection" : "ready";
+          if (!hasCandidates) {
+            entry.status = "error";
+            entry.errorMessage = result.number
+              ? "Nummer " + result.number + " nicht in Riftcodex gefunden — ✎ manuell eintragen"
+              : "Kartennummer nicht lesbar — Karte schärfer halten oder ✎ manuell eintragen";
+          } else {
+            entry.status = "needs_selection";
+          }
           entry.game = detectedGame;
-          entry.name = bestGuess ? bestGuess.name : (result.name || "");
-          entry.set = bestGuess ? bestGuess.set : (result.set || "");
-          entry.number = bestGuess ? bestGuess.number : (result.number || "");
-          entry.rarity = bestGuess ? bestGuess.rarity : (result.rarity || "");
+          entry.name = "";
+          entry.set = "";
+          entry.number = result.number || "";
+          entry.rarity = "";
           entry.foil = foilValue;
-          entry.language = result.language || "EN";
+          entry.language = "EN";
           entry.notes = result.notes || "";
           entry.confidence = result.confidence || "medium";
           entry.candidates = candidates;
-          entry.selectedCandidate = hasCandidates ? null : bestGuess; // bei Unsicherheit nichts vorauswählen
-          entry.cardImageUrl = (hasCandidates ? "" : (bestGuess ? bestGuess.imageUrl : ""));
+          entry.selectedCandidate = null;
+          entry.cardImageUrl = "";
           entry.uncertainFields = uncertainFields;
         }
         renderQueue();
@@ -1089,6 +1178,9 @@
     document.getElementById("settings-btn").onclick = function () {
       document.getElementById("api-key-overlay").classList.remove("hidden");
     };
+
+    // Riftcodex-Kartendatenbank im Hintergrund laden, damit sie beim ersten Scan sofort bereit ist
+    loadRiftcodexCache();
 
     document.getElementById("live-scan-start-btn").onclick = startLiveScan;
     document.getElementById("live-scan-stop-btn").onclick = stopLiveScan;
