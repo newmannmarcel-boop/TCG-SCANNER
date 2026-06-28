@@ -743,35 +743,47 @@
         : Promise.resolve([]);
 
       return candidatesPromise.then(function (candidates) {
-        if (candidates.length > 1) {
-          candidates = candidates.slice().sort(function (a, b) {
-            var sA = 0, sB = 0;
-            if (specialFilters.overnumber) { sA += a.isOvernumbered ? 1 : 0; sB += b.isOvernumbered ? 1 : 0; }
-            if (specialFilters.altArt)     { sA += a.isAltArt ? 1 : 0;      sB += b.isAltArt ? 1 : 0; }
-            if (specialFilters.promo)      { sA += a.isPromo ? 1 : 0;       sB += b.isPromo ? 1 : 0; }
-            return sB - sA;
-          });
-        }
         var entry = queue.filter(function (e) { return e.id === entryId; })[0];
         if (entry) {
           if (candidates.length === 0) {
             entry.status = "error";
             entry.errorMessage = result.number
-              ? "Nummer " + result.number + " nicht gefunden. " + (window._riftWithNumber || 0) + "/" + (riftcodexCache ? riftcodexCache.length : 0) + " Karten haben Nummer. Beispiele: " + (window._riftDebugSamples || "?") + " — ✎ manuell"
+              ? "Nummer " + result.number + " nicht gefunden — ✎ manuell"
               : "Nummer nicht lesbar — ✎ manuell eintragen";
-          } else if (candidates.length === 1) {
-            // Eindeutiger Treffer → automatisch bestätigen
-            var ac = candidates[0];
-            entry.status = "ready";
-            entry.name = ac.name;
-            entry.set = ac.set;
-            entry.number = ac.number;
-            entry.rarity = ac.rarity;
-            entry.selectedCandidate = ac;
-            entry.cardImageUrl = ac.imageUrl;
           } else {
-            // Mehrere Varianten (Promo, Alt-Art…) → Auswahl anzeigen
-            entry.status = "needs_selection";
+            // Filter (Promo, Overnumber, Alt Art) eingrenzen
+            var anyFilter = specialFilters.overnumber || specialFilters.altArt || specialFilters.promo;
+            var filtered = candidates;
+            if (anyFilter) {
+              var narrow = candidates.filter(function (c) {
+                if (specialFilters.overnumber && !c.isOvernumbered) return false;
+                if (specialFilters.altArt     && !c.isAltArt)      return false;
+                if (specialFilters.promo      && !c.isPromo)        return false;
+                return true;
+              });
+              // Falls Filter nichts liefert → alle zeigen
+              if (narrow.length > 0) filtered = narrow;
+            }
+
+            if (filtered.length === 1) {
+              // Eindeutig (durch Filter oder generell) → automatisch bestätigen
+              var ac = filtered[0];
+              entry.status = "ready";
+              entry.name = ac.name; entry.set = ac.set;
+              entry.number = ac.number; entry.rarity = ac.rarity;
+              entry.selectedCandidate = ac; entry.cardImageUrl = ac.imageUrl;
+            } else {
+              // Mehrere Varianten → Auswahl (Filter-Treffer oben)
+              filtered.sort(function (a, b) {
+                var sA = 0, sB = 0;
+                if (specialFilters.overnumber) { sA += a.isOvernumbered ? 1 : 0; sB += b.isOvernumbered ? 1 : 0; }
+                if (specialFilters.altArt)     { sA += a.isAltArt ? 1 : 0;      sB += b.isAltArt ? 1 : 0; }
+                if (specialFilters.promo)      { sA += a.isPromo ? 1 : 0;       sB += b.isPromo ? 1 : 0; }
+                return sB - sA;
+              });
+              candidates = filtered;
+              entry.status = "needs_selection";
+            }
           }
           entry.game = "riftbound";
           entry.name = ""; entry.set = ""; entry.number = result.number || ""; entry.rarity = "";
