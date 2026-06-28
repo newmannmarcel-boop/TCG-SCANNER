@@ -514,32 +514,54 @@
     oCtx.putImageData(oId, 0, 0); return out;
   }
 
-  function parseCardNumber(text) {
-    var t = (text || "").replace(/\s+/g, "")
+  // Parst Kartennummer UND Set-Code (z.B. "OGN", "SFD") aus OCR-Text
+  // → { number: "165/298", setCode: "OGN" } oder null wenn keine Nummer gefunden
+  function parseCardInfo(text) {
+    var raw = text || "";
+    // Set-Code aus dem ROH-Text (vor Zahlen-Substitutionen, sonst verlieren wir O→0)
+    // 2-4 Großbuchstaben, idealerweise direkt neben der Nummer
+    var setCode = null;
+    var setMatch = raw.match(/\b([A-Z]{2,4})\b/);
+    if (setMatch) setCode = setMatch[1];
+    // Nummer mit OCR-Korrekturen
+    var t = raw.replace(/\s+/g, "")
       .replace(/[oO]/g, "0").replace(/[lLI|]/g, "1").replace(/[bB]/g, "6");
     var m = t.match(/(\d{1,4})[*xX]?\/(\d{1,4})/);
-    return m ? m[1] + "/" + m[2] : null;
+    if (!m) return null;
+    return { number: m[1] + "/" + m[2], setCode: setCode };
+  }
+  // Rückwärtskompatibler Wrapper
+  function parseCardNumber(text) {
+    var info = parseCardInfo(text);
+    return info ? info.number : null;
   }
 
-  // Sucht die Kartennummer im unteren Teil des Bildes
-  // 1) Nativer TextDetector (Chrome/Android — kein Download nötig)
-  // 2) Tesseract mit Digit-Whitelist als Fallback
+  // Sucht Kartennummer + Set-Code im unteren Teil des Bildes
+  // Rückgabe: { number, setCode } oder null
   function findCardNumber(canvas) {
     var W = canvas.width, H = canvas.height;
-    // Untere Hälfte des Bildes — Karte füllt meist den Frame, Nummer ist unten
     var stripY = Math.floor(H * 0.50);
     var stripH = Math.floor(H * 0.48);
 
     if (typeof TextDetector !== "undefined") {
       var strip = cropAndScale(canvas, 0, stripY, W, stripH, 1);
       return new TextDetector().detect(strip).then(function(texts) {
+        // Set-Code aus ALLEN gefundenen Textblöcken sammeln, nicht nur dem ersten
+        var setCode = null;
+        for (var j = 0; j < texts.length; j++) {
+          var sm = (texts[j].rawValue || "").match(/\b([A-Z]{2,4})\b/);
+          if (sm) { setCode = sm[1]; break; }
+        }
         for (var i = 0; i < texts.length; i++) {
-          var n = parseCardNumber(texts[i].rawValue);
-          if (n) return n;
+          var info = parseCardInfo(texts[i].rawValue);
+          if (info) {
+            if (!info.setCode && setCode) info.setCode = setCode;
+            return info;
+          }
         }
         return null;
-      }).catch(function() { return null; }).then(function(n) {
-        return n || findCardNumberTesseract(canvas, W, H);
+      }).catch(function() { return null; }).then(function(info) {
+        return info || findCardNumberTesseract(canvas, W, H);
       });
     }
     return findCardNumberTesseract(canvas, W, H);
@@ -548,33 +570,27 @@
   function findCardNumberTesseract(canvas, W, H) {
     if (typeof Tesseract === "undefined") return Promise.resolve(null);
     var scBase = Math.max(2, Math.min(4, Math.round(1200 / W)));
-    var scHigh = Math.max(3, Math.min(6, Math.round(1800 / W))); // höhere Auflösung für enge Crops
-    // Untere Hälfte (50-98%) — breiter Suchbereich
-    var lo50 = cropAndScale(canvas, 0, Math.floor(H * 0.50), W, Math.floor(H * 0.48), scBase);
-    // Unteres Fünftel (78-98%) — höherer Scale für schärfere Nummer
-    var lo20 = cropAndScale(canvas, 0, Math.floor(H * 0.78), W, Math.floor(H * 0.20), scHigh);
-    // Sehr enger Bereich ganz unten (88-99%) — genaueste Position der Kartennummer
-    var lo10 = cropAndScale(canvas, 0, Math.floor(H * 0.88), W, Math.floor(H * 0.10), scHigh);
+    var scHigh = Math.max(3, Math.min(5, Math.round(1600 / W)));
+    // Crops nur on-demand bauen (lazy) — spart Arbeit wenn 1. Versuch klappt
+    var _lo50, _lo20, _lo10;
+    function lo50() { return _lo50 || (_lo50 = cropAndScale(canvas, 0, Math.floor(H * 0.50), W, Math.floor(H * 0.48), scBase)); }
+    function lo20() { return _lo20 || (_lo20 = cropAndScale(canvas, 0, Math.floor(H * 0.78), W, Math.floor(H * 0.20), scHigh)); }
+    function lo10() { return _lo10 || (_lo10 = cropAndScale(canvas, 0, Math.floor(H * 0.88), W, Math.floor(H * 0.10), scHigh)); }
+
+    // Nur 4 Versuche statt 9 → bei Misserfolg trotzdem ~50% schneller
     var attempts = [
-      // PSM 7 = einzelne Textzeile → ideal für "012/221"-Format
-      { img: toGrayscale(lo20),       psm: "7"  },
-      { img: binarize(lo20, false),   psm: "7"  },
-      { img: toGrayscale(lo10),       psm: "7"  },
-      { img: binarize(lo10, false),   psm: "7"  },
-      { img: binarize(lo10, true),    psm: "7"  },
-      // PSM 6 / 11 als Fallback für größere Bereiche
-      { img: toGrayscale(lo20),       psm: "6"  },
-      { img: toGrayscale(lo50),       psm: "11" },
-      { img: binarize(lo50, false),   psm: "11" },
-      { img: adaptiveThreshold(lo50), psm: "11" },
+      { make: function() { return toGrayscale(lo20()); }, psm: "7"  },
+      { make: function() { return toGrayscale(lo10()); }, psm: "7"  },
+      { make: function() { return binarize(lo20(), false); }, psm: "7"  },
+      { make: function() { return toGrayscale(lo50()); }, psm: "11" }
     ];
     return getOCRWorker().then(function(worker) {
       function next(i) {
         if (i >= attempts.length) return null;
         var a = attempts[i];
         return worker.setParameters({ tessedit_pageseg_mode: a.psm })
-          .then(function() { return worker.recognize(a.img); })
-          .then(function(r) { return parseCardNumber(r.data.text) || next(i + 1); })
+          .then(function() { return worker.recognize(a.make()); })
+          .then(function(r) { return parseCardInfo(r.data.text) || next(i + 1); })
           .catch(function() { return next(i + 1); });
       }
       return next(0);
@@ -669,13 +685,14 @@
     return riftcodexCachePromise;
   }
 
-  function searchRiftboundByNumber(number) {
+  function searchRiftboundByNumber(number, setCode) {
     if (!number) return Promise.resolve([]);
     var m = number.match(/(\d+)(\*?)\/(\d+)/);
     if (!m) return Promise.resolve([]);
     var baseNum  = parseInt(m[1], 10);
     var hasStar  = m[2] === "*";
     var totalNum = parseInt(m[3], 10);
+    var setCodeUp = setCode ? setCode.toUpperCase() : null;
 
     return loadRiftcodexCache().then(function (cache) {
       // Riftcodex-Format: "uni-060a-219"  ↔  Karte: "060/221"
@@ -694,6 +711,19 @@
         return p && p.num === baseNum;
       });
       if (byNum.length === 0) return [];
+
+      // Wenn Set-Code gelesen wurde: zuerst nach Set-Code filtern
+      // (matches gegen setId ODER ersten Buchstaben des riftbound_id)
+      if (setCodeUp) {
+        var bySet = byNum.filter(function (card) {
+          var sid = (card.setId || "").toUpperCase();
+          if (sid && sid === setCodeUp) return true;
+          // Fallback: erste Buchstaben von riftbound_id (z.B. "uni-..." → "UNI")
+          var rcPrefix = (card.number || "").split("-")[0];
+          return rcPrefix && rcPrefix.toUpperCase() === setCodeUp;
+        });
+        if (bySet.length > 0) byNum = bySet;
+      }
 
       // Nächstes Set nach OCR-Gesamtzahl bestimmen
       var totals = {};
@@ -784,7 +814,7 @@
     resultPromise.then(function (result) {
       var foilValue = foilMode === "foilOnly" ? true : foilMode === "nonFoilOnly" ? false : false;
       var candidatesPromise = result.number
-        ? searchRiftboundByNumber(result.number).catch(function () { return []; })
+        ? searchRiftboundByNumber(result.number, result.setCode).catch(function () { return []; })
         : Promise.resolve([]);
 
       return candidatesPromise.then(function (candidates) {
@@ -1037,17 +1067,18 @@
 
     setLiveStatusPill("Lese Nummer …", true);
 
-    findCardNumber(canvas).then(function(number) {
-      if (!number) {
+    findCardNumber(canvas).then(function(info) {
+      if (!info || !info.number) {
         setLiveStatusPill("Keine Nummer erkannt — Karte ruhig halten", false);
         liveBusy = false;
         return;
       }
-      setLiveStatusPill("Nummer erkannt: " + number, true);
+      var label = info.setCode ? info.setCode + " " + info.number : info.number;
+      setLiveStatusPill("Erkannt: " + label, true);
       canvas.toBlob(function(blob) {
         if (!blob) { liveBusy = false; return; }
         var file = new File([blob], "live-" + Date.now() + ".jpg", { type: "image/jpeg" });
-        addToQueue(file, { number: number });
+        addToQueue(file, { number: info.number, setCode: info.setCode });
       }, "image/jpeg", 0.92);
     }).catch(function() {
       setLiveStatusPill("Karte ruhig vor die Kamera halten", false);
