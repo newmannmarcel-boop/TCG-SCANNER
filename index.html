@@ -668,6 +668,16 @@
           return cm && parseInt(cm[1], 10) === baseNum;
         });
       }
+      // Diagnose: Beispiel-Nummern loggen damit wir das Format sehen
+      if (results.length === 0) {
+        var samples = cache.filter(function(c) { return c.number; }).slice(0, 5).map(function(c) { return c.number; });
+        console.warn("[Riftcodex] " + baseNum + "/" + totalNum + " nicht gefunden. Beispiele:", samples);
+        // Letzter Fallback: string-enthält
+        results = cache.filter(function (card) {
+          return (card.number || "").indexOf(String(baseNum)) !== -1;
+        });
+        if (results.length > 0) console.log("[Riftcodex] Enthält-Treffer:", results.length);
+      }
       results.sort(function (a, b) {
         var aStar = (a.number || "").indexOf("*") !== -1 ? 1 : 0;
         var bStar = (b.number || "").indexOf("*") !== -1 ? 1 : 0;
