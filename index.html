@@ -465,48 +465,56 @@
         main.width = w; main.height = h;
         main.getContext("2d").drawImage(img, 0, 0);
 
-        // Kartennummer: untere 16% des Bildes, mittlere 70%, 4x skaliert + Schwellwert
-        var cx = Math.floor(w * 0.15);
-        var cy = Math.floor(h * 0.78);
-        var cw = Math.floor(w * 0.70);
-        var ch = Math.floor(h * 0.16);
-        var numCanvas = cropAndPreprocess(main, cx, cy, cw, ch, 4);
-
         if (typeof Tesseract === "undefined") {
           reject(new Error("Tesseract nicht geladen — bitte Seite neu laden"));
           return;
         }
 
-        Tesseract.recognize(numCanvas, "eng").then(function (result) {
-          var text = (result.data.text || "").replace(/\s/g, "");
-          // Suche nach Muster wie 045/298 oder 228*/219 oder 228x/219
-          var match = text.match(/(\d{1,4})\s*([*xX]?)\s*\/\s*(\d{1,4})/);
+        // Kartenname: oberer Bereich der Karte (innerhalb des Guide-Rahmens),
+        // 3x skaliert, nur Graustufen (kein hartes Schwellwert — Name hat mehr Kontrast)
+        var nameCx = Math.floor(w * 0.15);
+        var nameCy = Math.floor(h * 0.13);
+        var nameCw = Math.floor(w * 0.70);
+        var nameCh = Math.floor(h * 0.12);
+        var nameCanvas = cropAndEnhance(main, nameCx, nameCy, nameCw, nameCh, 3);
+
+        // Kartennummer: unterer Bereich, 4x skaliert + Schwellwert
+        var numCx = Math.floor(w * 0.15);
+        var numCy = Math.floor(h * 0.79);
+        var numCw = Math.floor(w * 0.70);
+        var numCh = Math.floor(h * 0.12);
+        var numCanvas = cropAndPreprocess(main, numCx, numCy, numCw, numCh, 4);
+
+        Promise.all([
+          Tesseract.recognize(nameCanvas, "eng"),
+          Tesseract.recognize(numCanvas, "eng")
+        ]).then(function (results) {
+          var nameText = (results[0].data.text || "").trim();
+          var numText  = (results[1].data.text || "").replace(/\s/g, "");
+
+          // Nummer: suche Muster wie 045/298 oder 228*/219 oder 228x/219
+          var numMatch = numText.match(/(\d{1,4})\s*([*xX]?)\s*\/\s*(\d{1,4})/);
           var number = "";
           var uncertain = [];
-
-          if (match) {
-            var base = match[1];
-            var raw = match[2];
-            // 'x' oder 'X' ist oft ein falsch erkanntes '*'
-            var hasStar = raw === "*";
+          if (numMatch) {
+            var raw = numMatch[2];
             var ambiguous = raw === "x" || raw === "X";
-            number = base + (hasStar || ambiguous ? "*" : "") + "/" + match[3];
-            if (ambiguous) uncertain.push("number"); // Stern war unklar (x statt *)
-          } else {
-            uncertain.push("number");
+            number = numMatch[1] + (raw === "*" || ambiguous ? "*" : "") + "/" + numMatch[3];
+            if (ambiguous) uncertain.push("number");
           }
+
+          // Name: erste nicht-leere Zeile, bereinigt
+          var cardName = nameText.split("\n").map(function (l) { return l.trim(); })
+            .filter(function (l) { return l.length > 1; })[0] || "";
 
           resolve({
             game: "riftbound",
-            name: "",
-            set: "",
+            name: cardName,
             number: number,
-            rarity: "",
-            foil: false,
-            language: "EN",
-            confidence: number ? "medium" : "low",
+            set: "", rarity: "", foil: false, language: "EN",
+            confidence: (cardName || number) ? "medium" : "low",
             uncertain_fields: uncertain,
-            notes: number ? "" : "Kartennummer konnte nicht gelesen werden"
+            notes: ""
           });
         }).catch(function (e) {
           reject(new Error("OCR fehlgeschlagen: " + (e.message || e)));
@@ -515,6 +523,26 @@
       img.onerror = function () { reject(new Error("Bild konnte nicht geladen werden")); };
       img.src = imageUrl;
     });
+  }
+
+  // Wie cropAndPreprocess aber ohne hartes Schwellwert — für Bereiche mit lesbarer Schrift
+  function cropAndEnhance(canvas, x, y, w, h, scale) {
+    var out = document.createElement("canvas");
+    out.width = Math.max(1, Math.round(w * scale));
+    out.height = Math.max(1, Math.round(h * scale));
+    var ctx = out.getContext("2d");
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(canvas, x, y, w, h, 0, 0, out.width, out.height);
+    var id = ctx.getImageData(0, 0, out.width, out.height);
+    var d = id.data;
+    for (var i = 0; i < d.length; i += 4) {
+      var g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      // Kontrast leicht erhöhen
+      g = Math.min(255, Math.max(0, (g - 128) * 1.4 + 128));
+      d[i] = d[i + 1] = d[i + 2] = g;
+    }
+    ctx.putImageData(id, 0, 0);
+    return out;
   }
 
   function loadRiftcodexCache() {
@@ -622,10 +650,17 @@
 
       var candidatesPromise = Promise.resolve([]);
       if (result.number) {
-        candidatesPromise = searchRiftboundByNumber(result.number).catch(function (e) {
-          console.error("Riftcodex Nummern-Suche fehlgeschlagen", e);
-          return [];
+        candidatesPromise = searchRiftboundByNumber(result.number).then(function (res) {
+          // Wenn Nummer keine Treffer → Name-Suche als Fallback
+          if (res.length === 0 && result.name) {
+            return searchRiftboundCards(result.name).catch(function () { return []; });
+          }
+          return res;
+        }).catch(function () {
+          return result.name ? searchRiftboundCards(result.name).catch(function () { return []; }) : [];
         });
+      } else if (result.name) {
+        candidatesPromise = searchRiftboundCards(result.name).catch(function () { return []; });
       }
 
       return candidatesPromise.then(function (candidates) {
