@@ -619,6 +619,22 @@
     });
   }
 
+  function mapRiftcodexCard(card) {
+    return {
+      riftcodexId: card.id,
+      name: card.name,
+      number: card.riftbound_id || "",
+      set: (card.set && card.set.label) || "",
+      setId: (card.set && card.set.set_id) || "",
+      rarity: (card.classification && card.classification.rarity) || "",
+      imageUrl: (card.media && card.media.image_url) || "",
+      isPromo: !!(card.set && card.set.set_id === "OPP"),
+      isAltArt: !!(card.metadata && card.metadata.alternate_art),
+      isOvernumbered: !!(card.metadata && card.metadata.overnumbered),
+      isSignature: !!(card.metadata && card.metadata.signature)
+    };
+  }
+
   function loadRiftcodexCache() {
     if (riftcodexCache) return Promise.resolve(riftcodexCache);
     if (riftcodexCachePromise) return riftcodexCachePromise;
@@ -626,29 +642,34 @@
       var raw = localStorage.getItem(STORAGE_KEY_RCACHE);
       if (raw) { riftcodexCache = JSON.parse(raw); return Promise.resolve(riftcodexCache); }
     } catch (e) {}
-    riftcodexCachePromise = fetch(RIFTCODEX_BASE + "/cards?size=2000")
+    // Paginiert laden (API erlaubt max. size=100)
+    riftcodexCachePromise = fetch(RIFTCODEX_BASE + "/cards?size=100&page=1")
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        riftcodexCache = (data.items || []).map(function (card) {
-          return {
-            riftcodexId: card.id,
-            name: card.name,
-            number: card.riftbound_id || "",
-            set: (card.set && card.set.label) || "",
-            setId: (card.set && card.set.set_id) || "",
-            rarity: (card.classification && card.classification.rarity) || "",
-            imageUrl: (card.media && card.media.image_url) || "",
-            isPromo: !!(card.set && card.set.set_id === "OPP"),
-            isAltArt: !!(card.metadata && card.metadata.alternate_art),
-            isOvernumbered: !!(card.metadata && card.metadata.overnumbered),
-            isSignature: !!(card.metadata && card.metadata.signature)
-          };
+        var allItems = (data.items || []);
+        var totalPages = data.pages || 1;
+        if (totalPages <= 1) return allItems;
+        var pagePromises = [];
+        for (var p = 2; p <= totalPages; p++) {
+          pagePromises.push(
+            fetch(RIFTCODEX_BASE + "/cards?size=100&page=" + p)
+              .then(function (r) { return r.json(); })
+              .then(function (d) { return d.items || []; })
+              .catch(function () { return []; })
+          );
+        }
+        return Promise.all(pagePromises).then(function (pages) {
+          pages.forEach(function (pg) { allItems = allItems.concat(pg); });
+          return allItems;
         });
+      })
+      .then(function (allItems) {
+        riftcodexCache = allItems.map(mapRiftcodexCard);
         try { localStorage.setItem(STORAGE_KEY_RCACHE, JSON.stringify(riftcodexCache)); } catch (e) {}
         riftcodexCachePromise = null;
         return riftcodexCache;
       })
-      .catch(function (e) {
+      .catch(function () {
         riftcodexCachePromise = null;
         return [];
       });
