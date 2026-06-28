@@ -668,15 +668,13 @@
           return cm && parseInt(cm[1], 10) === baseNum;
         });
       }
-      // Diagnose: Beispiel-Nummern für Fehlermeldung sammeln
+      // Diagnose: Format-Beispiele für Fehlermeldung
       if (results.length === 0) {
         var sampleNums = cache.filter(function(c) { return c.number; }).slice(0, 3).map(function(c) { return '"' + c.number + '"'; });
         window._riftDebugSamples = sampleNums.join(", ");
-        // Letzter Fallback: string-enthält
-        results = cache.filter(function (card) {
-          return (card.number || "").indexOf(String(baseNum)) !== -1;
-        });
       }
+      // Zu viele Treffer = OCR hat wahrscheinlich falsche Nummer gelesen → verwerfen
+      if (results.length > 8) results = [];
       results.sort(function (a, b) {
         var aStar = (a.number || "").indexOf("*") !== -1 ? 1 : 0;
         var bStar = (b.number || "").indexOf("*") !== -1 ? 1 : 0;
