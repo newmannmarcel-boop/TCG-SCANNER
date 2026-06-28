@@ -924,6 +924,34 @@
     pill.classList.toggle("capturing", !!capturing);
   }
 
+  // Schwellwert ab dem eine Karte als "erkannt" gilt (0–1 Cosine-Ähnlichkeit)
+  var DETECT_THRESHOLD = 0.79;
+
+  function analyzeCanvasFrame(canvas) {
+    if (!cardHashDB || Object.keys(cardHashDB).length < 10) return null;
+    var w = canvas.width, h = canvas.height;
+    var guideTop = h * 0.12, guideH = h * 0.76;
+    var artY = Math.floor(guideTop + guideH * 0.15);
+    var artH = Math.floor(guideH * 0.57);
+    var artX = Math.floor(w * 0.15);
+    var artW = Math.floor(w * 0.70);
+    var grid;
+    try { grid = computeColorGrid(canvas, artX, artY, artW, artH); }
+    catch(e) { return null; }
+    var top = [];
+    Object.keys(cardHashDB).forEach(function(id) {
+      top.push({ id: id, score: cosineSim(grid, cardHashDB[id]) });
+    });
+    top.sort(function(a, b) { return b.score - a.score; });
+    top = top.slice(0, 8);
+    var best = top[0] ? top[0].score : 0;
+    return {
+      colorMatchIds: top.map(function(m) { return m.id; }),
+      topScore: best,
+      confidence: best > 0.93 ? "high" : best > 0.83 ? "medium" : "low"
+    };
+  }
+
   function captureLiveFrame() {
     if (liveBusy) return;
     var video = document.getElementById("live-video");
@@ -931,20 +959,82 @@
     if (!video || video.readyState < 2) return;
 
     liveBusy = true;
-    setLiveStatusPill("Erfasse Karte …", true);
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-    var ctx = canvas.getContext("2d");
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
 
+    var result = analyzeCanvasFrame(canvas);
+    var n = cardHashDB ? Object.keys(cardHashDB).length : 0;
+
+    if (!result) {
+      setLiveStatusPill("Bildabgleich lädt … " + n + "/" + hashBuildTotal, false);
+      liveBusy = false;
+      return;
+    }
+
+    var pct = Math.round(result.topScore * 100);
+    if (result.topScore < DETECT_THRESHOLD) {
+      setLiveStatusPill("Kein Treffer · " + pct + "% — Karte näher halten", false);
+      liveBusy = false;
+      return;
+    }
+
+    setLiveStatusPill("Karte erkannt · " + pct + "% — wird hinzugefügt …", true);
     canvas.toBlob(function (blob) {
       if (blob) {
         var file = new File([blob], "live-" + Date.now() + ".jpg", { type: "image/jpeg" });
-        addToQueue(file);
+        addToQueuePreanalyzed(file, result);
       }
-      setLiveStatusPill("Karte ruhig vor die Kamera halten", false);
       liveBusy = false;
     }, "image/jpeg", 0.9);
+  }
+
+  function addToQueuePreanalyzed(file, preResult) {
+    var previewUrl = URL.createObjectURL(file);
+    var entryId = uid();
+    queue.push({
+      id: entryId, status: "analyzing", previewUrl: previewUrl, cardImageUrl: "",
+      game: "riftbound", name: "", set: "", number: "", rarity: "",
+      foil: foilMode === "foilOnly", language: "EN", condition: "Near Mint",
+      quantity: 1, notes: "", confidence: preResult.confidence || "medium",
+      candidates: [], selectedCandidate: null, uncertainFields: [],
+      matchScore: preResult.topScore
+    });
+    renderQueue();
+
+    var foilValue = foilMode === "foilOnly" ? true : foilMode === "nonFoilOnly" ? false : false;
+    var candidatesPromise = Promise.resolve([]);
+    if (preResult.colorMatchIds && preResult.colorMatchIds.length > 0) {
+      candidatesPromise = loadRiftcodexCache().then(function(cache) {
+        return preResult.colorMatchIds
+          .map(function(id) { return cache.find(function(c) { return c.riftcodexId === id; }); })
+          .filter(function(c) { return !!c; });
+      });
+    }
+    candidatesPromise.then(function(candidates) {
+      if (candidates.length > 1) {
+        candidates = candidates.slice().sort(function(a, b) {
+          var sA = 0, sB = 0;
+          if (specialFilters.overnumber) { sA += a.isOvernumbered ? 1 : 0; sB += b.isOvernumbered ? 1 : 0; }
+          if (specialFilters.altArt)     { sA += a.isAltArt ? 1 : 0;      sB += b.isAltArt ? 1 : 0; }
+          if (specialFilters.promo)      { sA += a.isPromo ? 1 : 0;       sB += b.isPromo ? 1 : 0; }
+          return sB - sA;
+        });
+      }
+      var entry = queue.filter(function(e) { return e.id === entryId; })[0];
+      if (entry) {
+        entry.status = candidates.length > 0 ? "needs_selection" : "error";
+        if (candidates.length === 0) entry.errorMessage = "Keine passende Karte gefunden — ✎ manuell eintragen";
+        entry.foil = foilValue;
+        entry.candidates = candidates;
+        entry.matchScore = preResult.topScore;
+      }
+      renderQueue();
+    }).catch(function(e) {
+      var entry = queue.filter(function(en) { return en.id === entryId; })[0];
+      if (entry) { entry.status = "error"; entry.errorMessage = e.message || "Fehler"; }
+      renderQueue();
+    });
   }
 
   function showLiveError(msg) {
@@ -1072,7 +1162,8 @@
           img + '<div class="tag">' + tag + '</div><div class="cname">' + escapeHtml(c.name) + '</div><div class="cnum">' + escapeHtml(c.number) + '</div></button>';
       }).join("");
 
-      var subtitle = entry.candidates.length + ' Treffer gefunden — tippe die richtige an';
+      var pctLabel = entry.matchScore ? Math.round(entry.matchScore * 100) + '% Übereinstimmung — ' : '';
+      var subtitle = pctLabel + entry.candidates.length + ' Vorschläge — tippe die richtige an';
       if (subtitleExtra.length) subtitle += ' (' + subtitleExtra.join(", ") + ')';
 
       return '<div class="candidate-box"><div class="candidate-header"><img src="' + escapeHtml(entry.previewUrl) + '" alt="">' +
