@@ -437,11 +437,10 @@
   function getOCRWorker() {
     if (_ocrWorker) return Promise.resolve(_ocrWorker);
     if (typeof Tesseract === "undefined") return Promise.reject(new Error("Tesseract nicht geladen"));
+    // Kein Whitelist — lässt Tesseract alle Zeichen lesen, Regex filtert danach
     return Tesseract.createWorker("eng").then(function(w) {
-      return w.setParameters({
-        tessedit_char_whitelist: "0123456789/*",
-        tessedit_pageseg_mode: "11"  // PSM 11 = Sparse text: findet Text überall im Bild
-      }).then(function() { _ocrWorker = w; return w; });
+      return w.setParameters({ tessedit_pageseg_mode: "11" })
+        .then(function() { _ocrWorker = w; return w; });
     });
   }
 
@@ -519,9 +518,9 @@
   // 2) Tesseract mit Digit-Whitelist als Fallback
   function findCardNumber(canvas) {
     var W = canvas.width, H = canvas.height;
-    // Großzügiger Suchbereich: unteres Drittel des Bildes
-    var stripY = Math.floor(H * 0.60);
-    var stripH = Math.floor(H * 0.38);
+    // Untere Hälfte des Bildes — Karte füllt meist den Frame, Nummer ist unten
+    var stripY = Math.floor(H * 0.50);
+    var stripH = Math.floor(H * 0.48);
 
     if (typeof TextDetector !== "undefined") {
       var strip = cropAndScale(canvas, 0, stripY, W, stripH, 1);
@@ -532,31 +531,38 @@
         }
         return null;
       }).catch(function() { return null; }).then(function(n) {
-        return n || findCardNumberTesseract(canvas, W, H, stripY, stripH);
+        return n || findCardNumberTesseract(canvas, W, H);
       });
     }
-    return findCardNumberTesseract(canvas, W, H, stripY, stripH);
+    return findCardNumberTesseract(canvas, W, H);
   }
 
-  function findCardNumberTesseract(canvas, W, H, stripY, stripH) {
+  function findCardNumberTesseract(canvas, W, H) {
     if (typeof Tesseract === "undefined") return Promise.resolve(null);
-    var scale = Math.max(2, Math.min(4, Math.round(1200 / W)));
-    // 5 Versuche mit unterschiedlicher Vorverarbeitung
+    var sc = Math.max(2, Math.min(4, Math.round(1200 / W)));
+    // Untere Hälfte (50-98%) — breiter Bereich
+    var lo50 = cropAndScale(canvas, 0, Math.floor(H * 0.50), W, Math.floor(H * 0.48), sc);
+    // Ganz unten (80-100%) — enger Bereich wo die Nummer auf TCG-Karten steht
+    var lo20 = cropAndScale(canvas, 0, Math.floor(H * 0.80), W, Math.floor(H * 0.18), sc);
     var attempts = [
-      binarize(cropAndScale(canvas, 0, stripY, W, stripH, scale), false),
-      binarize(cropAndScale(canvas, 0, stripY, W, stripH, scale), true),
-      adaptiveThreshold(cropAndScale(canvas, 0, stripY, W, stripH, scale)),
-      toGrayscale(cropAndScale(canvas, 0, stripY, W, stripH, scale)),  // roh, kein Threshold
-      // Engerer Crop in der Mitte als Extra-Versuch
-      binarize(cropAndScale(canvas, Math.floor(W*0.15), Math.floor(H*0.75),
-        Math.floor(W*0.70), Math.floor(H*0.20), scale), false)
+      // Raw Grayscale zuerst — kein Threshold, beste Chance bei unbekannter Beleuchtung
+      { img: toGrayscale(lo50), psm: "11" },
+      { img: toGrayscale(lo20), psm: "6"  },
+      // Binarisiert
+      { img: binarize(lo50, false), psm: "11" },
+      { img: binarize(lo50, true),  psm: "11" },
+      { img: adaptiveThreshold(lo50), psm: "11" },
+      { img: binarize(lo20, false), psm: "6" },
+      { img: binarize(lo20, true),  psm: "6" },
     ];
     return getOCRWorker().then(function(worker) {
       function next(i) {
         if (i >= attempts.length) return null;
-        return worker.recognize(attempts[i]).then(function(r) {
-          return parseCardNumber(r.data.text) || next(i + 1);
-        }).catch(function() { return next(i + 1); });
+        var a = attempts[i];
+        return worker.setParameters({ tessedit_pageseg_mode: a.psm })
+          .then(function() { return worker.recognize(a.img); })
+          .then(function(r) { return parseCardNumber(r.data.text) || next(i + 1); })
+          .catch(function() { return next(i + 1); });
       }
       return next(0);
     }).catch(function() { return null; });
