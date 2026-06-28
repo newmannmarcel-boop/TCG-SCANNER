@@ -1026,8 +1026,13 @@
     if (!video || video.readyState < 2) return;
 
     liveBusy = true;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    // Hohe Kamera-Auflösung auf sinnvolle OCR-Größe runterskalieren
+    // (1400px Breite ist mehr als genug für Kartennummern, OCR bleibt schnell)
+    var vw = video.videoWidth, vh = video.videoHeight;
+    var maxW = 1400;
+    var scale = vw > maxW ? maxW / vw : 1;
+    canvas.width  = Math.round(vw * scale);
+    canvas.height = Math.round(vh * scale);
     canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
 
     setLiveStatusPill("Lese Nummer …", true);
