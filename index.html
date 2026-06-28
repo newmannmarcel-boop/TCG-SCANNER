@@ -645,16 +645,23 @@
     if (!number) return Promise.resolve([]);
     var m = number.match(/(\d+)(\*?)\/(\d+)/);
     if (!m) return Promise.resolve([]);
-    var base = m[1];
+    var baseNum = parseInt(m[1], 10);   // Führende Nullen egal: "045" == 45 == "45"
     var hasStar = m[2] === "*";
-    var total = m[3];
+    var totalNum = parseInt(m[3], 10);
     return loadRiftcodexCache().then(function (cache) {
+      // Exakter Treffer (Nummer + Gesamtanzahl)
       var results = cache.filter(function (card) {
         var cm = (card.number || "").match(/(\d+)(\*?)\/(\d+)/);
         if (!cm) return false;
-        return cm[1] === base && cm[3] === total;
+        return parseInt(cm[1], 10) === baseNum && parseInt(cm[3], 10) === totalNum;
       });
-      // Sortierung: Stern-Variante vorne wenn Stern erkannt, sonst normale vorne
+      // Fallback: nur nach Kartennummer suchen (Gesamtanzahl ignorieren)
+      if (results.length === 0) {
+        results = cache.filter(function (card) {
+          var cm = (card.number || "").match(/^(\d+)/);
+          return cm && parseInt(cm[1], 10) === baseNum;
+        });
+      }
       results.sort(function (a, b) {
         var aStar = (a.number || "").indexOf("*") !== -1 ? 1 : 0;
         var bStar = (b.number || "").indexOf("*") !== -1 ? 1 : 0;
@@ -730,7 +737,7 @@
           if (candidates.length === 0) {
             entry.status = "error";
             entry.errorMessage = result.number
-              ? "Nummer " + result.number + " nicht in Riftcodex — ✎ manuell"
+              ? "Nummer " + result.number + " nicht gefunden (" + (riftcodexCache ? riftcodexCache.length : 0) + " Karten geladen) — ✎ manuell"
               : "Nummer nicht lesbar — ✎ manuell eintragen";
           } else {
             entry.status = "needs_selection";
