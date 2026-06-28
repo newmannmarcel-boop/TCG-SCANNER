@@ -754,7 +754,18 @@
             entry.errorMessage = result.number
               ? "Nummer " + result.number + " nicht gefunden (" + (riftcodexCache ? riftcodexCache.length : 0) + " Karten). Format-Beispiele: " + (window._riftDebugSamples || "?") + " — ✎ manuell"
               : "Nummer nicht lesbar — ✎ manuell eintragen";
+          } else if (candidates.length === 1) {
+            // Eindeutiger Treffer → automatisch bestätigen
+            var ac = candidates[0];
+            entry.status = "ready";
+            entry.name = ac.name;
+            entry.set = ac.set;
+            entry.number = ac.number;
+            entry.rarity = ac.rarity;
+            entry.selectedCandidate = ac;
+            entry.cardImageUrl = ac.imageUrl;
           } else {
+            // Mehrere Varianten (Promo, Alt-Art…) → Auswahl anzeigen
             entry.status = "needs_selection";
           }
           entry.game = "riftbound";
