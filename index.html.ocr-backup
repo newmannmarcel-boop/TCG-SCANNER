@@ -1,0 +1,1985 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kartenkammer</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap');
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0E0D0B;
+    color: #EDE7D9;
+    font-family: 'Inter', system-ui, sans-serif;
+    min-height: 100vh;
+  }
+  .font-display { font-family: 'Space Grotesk', sans-serif; }
+  button { font-family: inherit; cursor: pointer; }
+  input, select, textarea { font-family: inherit; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #3A362C; border-radius: 4px; }
+  .focus-ring:focus-visible { outline: 2px solid #C9A24B; outline-offset: 2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spin { animation: spin 1s linear infinite; }
+  @keyframes slideUp {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .slide-up { animation: slideUp 0.3s ease-out; }
+  .hidden { display: none !important; }
+
+  header { border-bottom: 1px solid #262219; padding: 20px 20px 16px; }
+  .header-title-row { display: flex; align-items: baseline; gap: 10px; }
+  .header-title-row h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+  .header-count { font-size: 12px; color: #8A8270; font-weight: 500; }
+  nav { display: flex; gap: 4px; margin-top: 14px; }
+  .tab-btn {
+    padding: 8px 16px; border-radius: 8px; border: none; font-size: 13px; font-weight: 600;
+    background: transparent; color: #A89F8A; transition: all 0.15s;
+  }
+  .tab-btn.active { background: #C9A24B; color: #1A1710; }
+
+  main { padding: 20px; max-width: 560px; margin: 0 auto; }
+  main.wide { max-width: 720px; }
+
+  .section-label {
+    font-size: 11px; font-weight: 600; color: #8A8270; margin-bottom: 8px;
+    text-transform: uppercase; letter-spacing: 0.03em;
+  }
+  .mode-row { display: flex; gap: 6px; }
+  .mode-btn {
+    flex: 1; padding: 9px 8px; border-radius: 8px; border: 1.5px solid #262219;
+    background: transparent; color: #8A8270; font-size: 12px; font-weight: 600;
+  }
+  .mode-btn.active { border: 1.5px solid #C9A24B; background: #C9A24B22; color: #C9A24B; }
+  .source-note { font-size: 10px; color: #6B6452; margin-top: 8px; line-height: 1.4; }
+
+  .btn-primary {
+    background: #C9A24B; color: #1A1710; border: none; border-radius: 10px;
+    padding: 12px 16px; font-size: 13px; font-weight: 700; display: flex;
+    align-items: center; justify-content: center; gap: 7px;
+  }
+  .btn-secondary {
+    background: transparent; color: #A89F8A; border: 1px solid #2A2618; border-radius: 10px;
+    padding: 12px 16px; font-size: 13px; font-weight: 600; display: flex;
+    align-items: center; justify-content: center; gap: 7px;
+  }
+  .btn-save-all {
+    background: #1A3324; color: #6FCF8F; border: 1px solid #2A4A36; border-radius: 8px;
+    padding: 7px 14px; font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 6px;
+  }
+  .btn-icon {
+    background: transparent; border: none; color: #6B6452; padding: 6px; border-radius: 6px;
+    display: flex; align-items: center;
+  }
+  .input-field {
+    width: 100%; background: #1A1710; border: 1px solid #2A2618; border-radius: 8px;
+    padding: 9px 12px; font-size: 13px; color: #EDE7D9;
+  }
+  .form-field { margin-bottom: 10px; }
+  .form-field label {
+    display: block; font-size: 10px; font-weight: 600; color: #8A8270; margin-bottom: 5px;
+    text-transform: uppercase; letter-spacing: 0.03em;
+  }
+  .form-row { display: flex; gap: 10px; }
+  .form-row > div { flex: 1; }
+
+  .empty-box {
+    border: 1.5px dashed #3A362C; border-radius: 16px; padding: 40px 24px; text-align: center;
+    background: #16140F;
+  }
+  .empty-box p { font-size: 13px; color: #8A8270; line-height: 1.5; margin-top: 12px; }
+
+  .queue-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .queue-header span { font-size: 13px; font-weight: 600; color: #A89F8A; }
+  .queue-list { display: flex; flex-direction: column; gap: 8px; }
+
+  .queue-row {
+    display: flex; align-items: center; gap: 10px; background: #16140F; border-radius: 12px;
+    padding: 10px 12px; border-left: 3px solid #6B6452;
+  }
+  .queue-row img { width: 38px; height: 52px; object-fit: cover; border-radius: 5px; flex-shrink: 0; }
+  .queue-row .info { flex: 1; min-width: 0; }
+  .queue-row .name-row { display: flex; align-items: baseline; gap: 6px; }
+  .queue-row .name { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .queue-row .foil-tag { font-size: 10px; font-weight: 700; color: #C9A24B; }
+  .queue-row .meta { font-size: 12px; color: #8A8270; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .queue-row .analyzing { display: flex; align-items: center; gap: 7px; font-size: 13px; color: #8A8270; }
+  .queue-row .error-text { font-size: 13px; color: #D4824C; }
+
+  .candidate-box { background: #16140F; border-radius: 12px; padding: 14px; border: 1px solid #2A2618; }
+  .candidate-header { display: flex; gap: 10px; margin-bottom: 10px; }
+  .candidate-header img { width: 44px; height: 60px; object-fit: cover; border-radius: 6px; flex-shrink: 0; }
+  .candidate-header .title { font-size: 13px; font-weight: 600; color: #EDE7D9; }
+  .candidate-header .subtitle { font-size: 11px; color: #8A8270; margin-top: 2px; }
+  .candidate-scroll { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+  .candidate-card {
+    flex-shrink: 0; width: 92px; background: transparent; border: 1px solid #2A2618; border-radius: 8px;
+    padding: 4px; cursor: pointer; text-align: left;
+  }
+  .candidate-card.selected { border: 2px solid #C9A24B; }
+  .candidate-card img { width: 100%; height: 110px; object-fit: cover; border-radius: 5px; display: block; }
+  .candidate-card .placeholder { width: 100%; height: 110px; border-radius: 5px; background: #1F1B12; }
+  .candidate-card .tag { font-size: 10px; color: #C9A24B; font-weight: 700; margin-top: 4px; }
+  .candidate-card .cname {
+    font-size: 10px; color: #A89F8A; line-height: 1.3; margin-top: 1px; overflow: hidden;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  }
+  .candidate-card .cnum { font-size: 9px; color: #6B6452; margin-top: 1px; }
+
+  .edit-box { background: #16140F; border-radius: 12px; padding: 14px; border: 1px solid #262219; }
+  .edit-header { display: flex; gap: 10px; margin-bottom: 8px; }
+  .edit-header img { width: 50px; height: 68px; object-fit: cover; border-radius: 6px; flex-shrink: 0; }
+  .game-chip-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .game-chip {
+    padding: 5px 10px; border-radius: 7px; border: 1px solid #262219; background: transparent;
+    color: #8A8270; font-size: 11px; font-weight: 600;
+  }
+  .game-chip.active { border-color: currentColor; }
+  .foil-checkbox-row { display: flex; align-items: center; gap: 10px; padding: 6px 0 10px; cursor: pointer; }
+  .foil-checkbox-row input { width: 16px; height: 16px; accent-color: #C9A24B; }
+
+  .live-video-wrap { position: relative; border-radius: 14px; overflow: hidden; background: #000; margin-bottom: 8px; }
+  .live-video-wrap video { width: 100%; display: block; aspect-ratio: 3 / 4; object-fit: cover; max-height: 62vh; cursor: crosshair; }
+  .live-status-bar { position: absolute; top: 10px; left: 10px; right: 10px; display: flex; justify-content: space-between; align-items: center; }
+  .live-status-pill {
+    background: rgba(0,0,0,0.55); color: #EDE7D9; font-size: 11px; font-weight: 600; padding: 5px 10px;
+    border-radius: 20px; display: flex; align-items: center; gap: 6px;
+  }
+  .live-status-pill.capturing { color: #C9A24B; }
+  .live-cam-info {
+    position: absolute; top: 8px; right: 8px;
+    background: rgba(0,0,0,0.6); color: #EDE7D9; font-size: 10px; font-weight: 600;
+    padding: 3px 7px; border-radius: 6px; letter-spacing: 0.3px; pointer-events: none;
+    font-variant-numeric: tabular-nums;
+  }
+  .live-torch-btn {
+    position: absolute; bottom: 8px; right: 8px;
+    background: rgba(0,0,0,0.6); color: #EDE7D9; font-size: 11px; font-weight: 600;
+    padding: 6px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.15);
+    cursor: pointer; letter-spacing: 0.3px;
+  }
+  .live-torch-btn.on { background: rgba(201,162,75,0.85); color: #1A1710; border-color: rgba(201,162,75,1); }
+  .live-torch-btn.hidden { display: none; }
+  .live-focus-reticle {
+    position: absolute; width: 60px; height: 60px; border-radius: 50%;
+    border: 2px solid #C9A24B; box-shadow: 0 0 0 2px rgba(0,0,0,0.4);
+    pointer-events: none; animation: focusPulse 0.7s ease-out forwards;
+  }
+  @keyframes focusPulse {
+    0%   { transform: scale(1.4); opacity: 0; }
+    30%  { transform: scale(1.0); opacity: 1; }
+    100% { transform: scale(0.8); opacity: 0; }
+  }
+  /* Fester Fokus-Anker am Nummern-Bereich (unten-links der Karte) */
+  .live-focus-hint {
+    position: absolute; left: 22%; bottom: 18%;
+    width: 36px; height: 36px; border-radius: 50%;
+    border: 1.5px solid rgba(201,162,75,0.85);
+    box-shadow: 0 0 0 2px rgba(0,0,0,0.3);
+    pointer-events: none; font-size: 9px; color: rgba(201,162,75,0.85);
+    display: flex; align-items: center; justify-content: center; font-weight: 600;
+    letter-spacing: 0.3px;
+  }
+  .live-scan-diag {
+    margin: 6px 0 8px; padding: 7px 10px; border-radius: 8px;
+    background: #1A1710; border: 1px solid #2A2618;
+    font-size: 11px; color: #A89F8A; line-height: 1.4;
+    font-variant-numeric: tabular-nums; font-family: ui-monospace, Menlo, Consolas, monospace;
+    white-space: pre-line;
+  }
+  .live-scan-diag.ok   { border-color: #3A4A2A; color: #C9D4A8; }
+  .live-scan-diag.warn { border-color: #4A3A1A; color: #D4B49A; }
+  .live-scan-diag.err  { border-color: #4A2E1E; color: #D4A49A; }
+  .live-scan-diag.hidden { display: none; }
+  .live-frame-guide {
+    /* TCG-Karte 63×88mm = 1.4:1 — Im 3:4-Container: Breite 72% → Höhe ≈ 76% → AR=1.41 */
+    position: absolute; top: 12%; left: 14%; right: 14%; bottom: 12%;
+    border: 2px dashed rgba(201,162,75,0.6); border-radius: 12px; pointer-events: none;
+  }
+
+  .error-banner {
+    display: flex; gap: 8px; background: #241A14; border: 1px solid #4A2E1E; border-radius: 10px;
+    padding: 10px; margin-bottom: 14px; font-size: 12px; color: #D4B49A; line-height: 1.4;
+  }
+  .toast-banner {
+    position: fixed; bottom: 16px; left: 16px; right: 16px; background: #241A14; border: 1px solid #4A2E1E;
+    border-radius: 10px; padding: 12px; display: flex; gap: 10px; align-items: flex-start; max-width: 560px;
+    margin: 0 auto; font-size: 12px; color: #D4B49A; line-height: 1.4;
+  }
+
+  .filter-chips { display: flex; gap: 6px; margin-bottom: 18px; overflow-x: auto; padding-bottom: 4px; }
+  .filter-chip {
+    flex-shrink: 0; padding: 6px 14px; border-radius: 20px; border: 1.5px solid #262219;
+    background: transparent; color: #8A8270; font-size: 12px; font-weight: 600; white-space: nowrap;
+  }
+  .filter-chip.active { border-color: currentColor; background-color: color-mix(in srgb, currentColor 13%, transparent); }
+
+  .search-wrap { position: relative; flex: 1; margin-bottom: 14px; }
+  .search-wrap input { padding-left: 34px; }
+  .search-icon { position: absolute; left: 12px; top: 11px; }
+
+  .empty-collection { text-align: center; padding: 60px 20px; color: #6B6452; }
+  .empty-collection p { font-size: 14px; margin-top: 12px; }
+
+  .game-group { margin-bottom: 28px; }
+  .game-group-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .game-group-dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+  .game-group-header h2 { font-size: 15px; font-weight: 700; }
+  .game-group-header .count { font-size: 12px; color: #6B6452; font-weight: 500; }
+  .game-group-header .rule { flex: 1; height: 1px; background: #262219; }
+
+  .card-row {
+    display: flex; align-items: center; gap: 12px; background: #16140F; border-radius: 12px;
+    padding: 12px 14px; border-left: 3px solid #6B6452;
+  }
+  .card-row img, .card-row .img-placeholder { width: 38px; height: 52px; border-radius: 5px; flex-shrink: 0; object-fit: cover; }
+  .card-row .img-placeholder { background: #1F1B12; }
+  .card-row .qty { font-size: 13px; font-weight: 700; flex-shrink: 0; }
+
+  .api-key-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: flex; align-items: center;
+    justify-content: center; padding: 20px; z-index: 1000;
+  }
+  .api-key-box {
+    background: #16140F; border: 1px solid #262219; border-radius: 16px; padding: 24px; max-width: 420px;
+    width: 100%;
+  }
+  .api-key-box h2 { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
+  .api-key-box p { font-size: 13px; color: #8A8270; line-height: 1.5; margin-bottom: 16px; }
+  .api-key-box a { color: #C9A24B; }
+
+  .stat-grid { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 24px; }
+  .stat-box { flex: 1 1 80px; background: #16140F; border-radius: 10px; padding: 10px 12px; border-left: 3px solid #6B6452; }
+  .stat-box .label { font-size: 11px; color: #8A8270; font-weight: 600; }
+  .stat-box .value { font-size: 18px; font-weight: 700; }
+
+  details > summary { font-size: 11px; color: #6B6452; cursor: pointer; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+</head>
+<body>
+
+<div id="api-key-overlay" class="api-key-overlay hidden">
+  <div class="api-key-box">
+    <h2 class="font-display">Anthropic API-Key</h2>
+    <p>
+      Diese App läuft außerhalb von Claude und braucht deinen eigenen Anthropic API-Key für die Karten-Erkennung.
+      Er wird ausschließlich lokal in deinem Browser gespeichert (localStorage), niemals an einen Server außer Anthropic selbst gesendet.
+      Key bekommst du unter <a href="https://console.anthropic.com" target="_blank" rel="noopener">console.anthropic.com</a>.
+    </p>
+    <input type="password" id="api-key-input" class="input-field" placeholder="sk-ant-..." style="margin-bottom: 12px;">
+    <button id="api-key-save" type="button" class="btn-primary focus-ring" style="width: 100%;">Speichern &amp; starten</button>
+  </div>
+</div>
+
+<header>
+  <div class="header-title-row">
+    <h1 class="font-display">Kartenkammer</h1>
+    <span class="header-count" id="header-count">0 Karten</span>
+    <button type="button" id="settings-btn" class="btn-icon focus-ring" style="margin-left:auto; font-size:16px;" title="API-Key einrichten">⚙</button>
+  </div>
+  <nav>
+    <button type="button" class="tab-btn focus-ring active" data-tab="scan" id="tab-scan">Scannen</button>
+    <button type="button" class="tab-btn focus-ring" data-tab="collection" id="tab-collection">Bestand</button>
+  </nav>
+</header>
+
+<main id="view-scan">
+  <div style="margin-bottom: 16px;">
+    <div class="section-label">Scan-Modus</div>
+    <div class="mode-row" id="foil-mode-row">
+      <button type="button" class="mode-btn focus-ring active" data-mode="either">Beide</button>
+      <button type="button" class="mode-btn focus-ring" data-mode="foilOnly">Nur Foil</button>
+      <button type="button" class="mode-btn focus-ring" data-mode="nonFoilOnly">Nur Non-Foil</button>
+    </div>
+    <div class="section-label" style="margin-top: 14px;">Filter (bleiben an, bis du sie selbst ausschaltest)</div>
+    <div class="mode-row" id="special-filter-row">
+      <button type="button" class="mode-btn focus-ring" data-filter="overnumber">Overnumber</button>
+      <button type="button" class="mode-btn focus-ring" data-filter="altArt">Alt Art</button>
+      <button type="button" class="mode-btn focus-ring" data-filter="promo">Promo</button>
+    </div>
+    <p class="source-note">Erkennung liest die Kartennummer per OCR (Chrome Android: nativer TextDetector; andere Browser: Tesseract.js). Beim ersten Scan lädt der OCR-Motor kurz nach (~5 Sek). Kartendaten von Riftcodex.com.</p>
+    <p id="ocr-engine-status" style="font-size:11px; margin-top:6px; color:#8A8270;"></p>
+  </div>
+
+  <button type="button" id="live-scan-start-btn" class="btn-primary focus-ring" style="width: 100%; padding: 14px 16px; font-size: 14px; margin-bottom: 10px;">
+    📷 Live-Scan starten
+  </button>
+
+  <div id="live-video-section" class="hidden" style="margin-bottom: 10px;">
+    <div class="live-video-wrap">
+      <video id="live-video" playsinline muted autoplay></video>
+      <div class="live-status-bar">
+        <span class="live-status-pill" id="live-status-pill">Karte ruhig vor die Kamera halten</span>
+      </div>
+      <div class="live-cam-info" id="live-cam-info">— × —</div>
+      <button type="button" id="live-torch-btn" class="live-torch-btn hidden">Blitz aus</button>
+      <div class="live-frame-guide"></div>
+      <div class="live-focus-hint" id="live-focus-hint">Fokus</div>
+    </div>
+    <div id="live-scan-diag" class="live-scan-diag hidden"></div>
+    <button type="button" id="live-scan-stop-btn" class="btn-secondary focus-ring" style="width: 100%;">✕ Live-Scan beenden</button>
+  </div>
+  <canvas id="live-canvas" class="hidden"></canvas>
+
+  <div id="live-error-banner" class="error-banner hidden"></div>
+
+  <div id="fallback-photo-section" class="hidden" style="margin-bottom: 18px;">
+    <div class="section-label">Foto aufnehmen</div>
+    <div style="display: flex; gap: 8px;">
+      <button type="button" id="camera-capture-btn-prominent" class="btn-primary focus-ring" style="flex: 1;">📷 Foto aufnehmen</button>
+      <button type="button" id="gallery-btn-prominent" class="btn-secondary focus-ring" style="flex: 1;">⬆ Aus Galerie</button>
+    </div>
+  </div>
+
+  <details id="fallback-photo-details" style="margin-bottom: 18px;">
+    <summary>Live-Scan funktioniert nicht? Foto oder Galerie nutzen</summary>
+    <div style="display: flex; gap: 8px; margin-top: 10px;">
+      <button type="button" id="camera-capture-btn" class="btn-secondary focus-ring" style="flex: 1;">📷 Foto aufnehmen</button>
+      <button type="button" id="gallery-btn" class="btn-secondary focus-ring" style="flex: 1;">⬆ Aus Galerie</button>
+    </div>
+    <input type="file" id="gallery-input-visible" accept="image/*" multiple style="width: 100%; font-size: 12px; color: #8A8270; padding: 8px 0;">
+  </details>
+
+  <input type="file" id="camera-input" accept="image/*" capture="environment" class="hidden">
+  <input type="file" id="gallery-input" accept="image/*" multiple class="hidden">
+
+  <div id="queue-empty" class="empty-box slide-up">
+    <p>Fotografier deinen Stapel Karte für Karte. Jede landet hier in der Warteschlange — am Ende prüfst du alle zusammen und speicherst auf einmal.</p>
+  </div>
+
+  <div id="queue-section" class="slide-up hidden">
+    <div class="queue-header">
+      <span id="queue-header-text">0 Karten im Stapel</span>
+      <button type="button" id="save-all-btn" class="btn-save-all focus-ring hidden">✓✓ <span id="save-all-count">0</span> speichern</button>
+    </div>
+    <div class="queue-list" id="queue-list"></div>
+  </div>
+
+  <div class="stat-grid hidden" id="stat-grid"></div>
+</main>
+
+<main id="view-collection" class="wide hidden">
+  <div style="display: flex; gap: 8px;">
+    <div class="search-wrap">
+      <span class="search-icon">🔍</span>
+      <input type="text" id="search-input" class="input-field focus-ring" placeholder="Name, Set oder Nummer suchen">
+    </div>
+  </div>
+  <div class="filter-chips" id="filter-chips"></div>
+  <div id="collection-content"></div>
+</main>
+
+<div id="toast-container"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var GAMES = {
+    riftbound: { label: "Riftbound", color: "#C9A24B", short: "RB" },
+    onepiece: { label: "One Piece", color: "#D44C2C", short: "OP" },
+    pokemon: { label: "Pokémon", color: "#2E6F40", short: "PKM" },
+    mtg: { label: "Magic", color: "#3A3A6E", short: "MTG" }
+  };
+  var CONDITIONS = ["Mint", "Near Mint", "Excellent", "Good", "Light Played", "Played", "Poor"];
+  var LANGUAGES = ["DE", "EN", "JP", "FR", "IT", "ES", "PT", "KR", "CN"];
+  var RIFTCODEX_BASE = "https://api.riftcodex.com";
+  var STORAGE_KEY_CARDS = "kartenkammer_cards";
+  var STORAGE_KEY_FOILMODE = "kartenkammer_foilmode";
+  var STORAGE_KEY_SPECIALFILTERS = "kartenkammer_special_filters";
+  var STORAGE_KEY_APIKEY = "kartenkammer_api_key";
+
+  var cards = [];
+  var queue = [];
+  var foilMode = "either";
+  var specialFilters = { overnumber: false, altArt: false, promo: false };
+  var view = "scan";
+  var filterGame = "all";
+  var searchTerm = "";
+  var editingQueueId = null;
+  var editingCardId = null;
+  var apiKey = "";
+
+  var liveActive = false;
+  var liveStream = null;
+  var liveInterval = null;
+  var liveBusy = false;
+  var liveCameraBlocked = false;
+  var liveTorchTrack = null;
+  var liveTorchOn = false;
+  var liveTorchMode = "off"; // "off" | "scan" | "on"
+  // Buffer der letzten OCR-Lesungen für Konsens-Validierung
+  // (verhindert falsche Bestätigungen bei OCR-Wackeln zwischen Frames)
+  var liveRecentReads = [];
+  var REQUIRED_AGREEMENT = 2; // gleiche Nummer in N aufeinanderfolgenden Reads → akzeptiert
+  // Großer Buffer + lange TTL: Auf Epic/Showcase-Karten klappt OCR nur
+  // 1 von 5-8 Versuchen. Die erste erfolgreiche Lesung muss lange genug
+  // erhalten bleiben bis eine zweite kommt.
+  var READ_BUFFER_MAX = 12;
+  var READ_TTL_MS = 30000;
+
+  var riftcodexCache = null;
+  var riftcodexCachePromise = null;
+  var STORAGE_KEY_RCACHE = "kartenkammer_riftcodex_v4";
+
+  var _ocrWorker = null; // Tesseract-Worker (wird beim ersten Scan geladen)
+
+  function uid() {
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  }
+
+  function escapeHtml(str) {
+    var div = document.createElement("div");
+    div.textContent = str == null ? "" : String(str);
+    return div.innerHTML;
+  }
+
+  function loadState() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY_CARDS);
+      if (raw) cards = JSON.parse(raw);
+    } catch (e) {}
+    try {
+      var mode = localStorage.getItem(STORAGE_KEY_FOILMODE);
+      if (mode) foilMode = mode;
+    } catch (e) {}
+    try {
+      var rawFilters = localStorage.getItem(STORAGE_KEY_SPECIALFILTERS);
+      if (rawFilters) {
+        var parsed = JSON.parse(rawFilters);
+        specialFilters.overnumber = !!parsed.overnumber;
+        specialFilters.altArt = !!parsed.altArt;
+        specialFilters.promo = !!parsed.promo;
+      }
+    } catch (e) {}
+    try {
+      apiKey = localStorage.getItem(STORAGE_KEY_APIKEY) || "";
+    } catch (e) {}
+  }
+
+  function saveSpecialFilters() {
+    try { localStorage.setItem(STORAGE_KEY_SPECIALFILTERS, JSON.stringify(specialFilters)); } catch (e) {}
+  }
+
+  function saveCards() {
+    try {
+      localStorage.setItem(STORAGE_KEY_CARDS, JSON.stringify(cards));
+    } catch (e) {
+      showToast("Speichern fehlgeschlagen. Deine letzten Änderungen wurden eventuell nicht gesichert.");
+    }
+  }
+
+  function saveFoilMode() {
+    try { localStorage.setItem(STORAGE_KEY_FOILMODE, foilMode); } catch (e) {}
+  }
+
+  function showToast(msg) {
+    var container = document.getElementById("toast-container");
+    var el = document.createElement("div");
+    el.className = "toast-banner";
+    el.innerHTML = '<span style="flex:1;">' + escapeHtml(msg) + '</span><button type="button" class="btn-icon focus-ring" style="flex-shrink:0;">✕</button>';
+    el.querySelector("button").onclick = function () { el.remove(); };
+    container.appendChild(el);
+    setTimeout(function () { el.remove(); }, 8000);
+  }
+
+  function fileToBase64(file) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onload = function () { resolve(r.result.split(",")[1]); };
+      r.onerror = reject;
+      r.readAsDataURL(file);
+    });
+  }
+
+  // ---- Texterkennung: TextDetector (nativ) + Tesseract Fallback ----
+
+  function getOCRWorker() {
+    if (_ocrWorker) return Promise.resolve(_ocrWorker);
+    if (typeof Tesseract === "undefined") return Promise.reject(new Error("Tesseract nicht geladen"));
+    // Kein Whitelist — lässt Tesseract alle Zeichen lesen, Regex filtert danach
+    return Tesseract.createWorker("eng").then(function(w) {
+      return w.setParameters({ tessedit_pageseg_mode: "11" })
+        .then(function() { _ocrWorker = w; return w; });
+    });
+  }
+
+  function cropAndScale(src, x, y, w, h, scale) {
+    var out = document.createElement("canvas");
+    out.width = Math.max(1, Math.round(w * scale));
+    out.height = Math.max(1, Math.round(h * scale));
+    var ctx = out.getContext("2d");
+    ctx.imageSmoothingEnabled = scale < 1;
+    ctx.drawImage(src, x, y, w, h, 0, 0, out.width, out.height);
+    return out;
+  }
+
+  function toGrayscale(canvas) {
+    var out = document.createElement("canvas");
+    out.width = canvas.width; out.height = canvas.height;
+    var ctx = out.getContext("2d"); ctx.drawImage(canvas, 0, 0);
+    var id = ctx.getImageData(0, 0, out.width, out.height), d = id.data;
+    for (var i = 0; i < d.length; i += 4) {
+      var g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+      d[i]=d[i+1]=d[i+2]=g;
+    }
+    ctx.putImageData(id, 0, 0); return out;
+  }
+
+  function binarize(canvas, invert) {
+    var out = document.createElement("canvas");
+    out.width = canvas.width; out.height = canvas.height;
+    var ctx = out.getContext("2d"); ctx.drawImage(canvas, 0, 0);
+    var id = ctx.getImageData(0, 0, out.width, out.height);
+    var d = id.data, sum = 0, px = d.length / 4;
+    for (var i = 0; i < d.length; i += 4) {
+      var g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+      d[i]=d[i+1]=d[i+2]=g; sum+=g;
+    }
+    var avg = sum / px;
+    for (var i = 0; i < d.length; i += 4) {
+      var v = d[i] > avg ? 255 : 0;
+      d[i]=d[i+1]=d[i+2]= invert ? 255-v : v;
+    }
+    ctx.putImageData(id, 0, 0); return out;
+  }
+
+  // Isoliert weißen Text auf buntem Hintergrund (Epic/Showcase-Karten).
+  // Pro Pixel: brightness = min(R,G,B). Weiß = hoch in allen Kanälen,
+  // bunte Farben = mindestens ein niedriger Kanal → werden dunkel.
+  // Ausgabe: schwarzer Text auf weiß für Tesseract.
+  function isolateWhiteText(canvas) {
+    var out = document.createElement("canvas");
+    out.width = canvas.width; out.height = canvas.height;
+    var ctx = out.getContext("2d"); ctx.drawImage(canvas, 0, 0);
+    var id = ctx.getImageData(0, 0, out.width, out.height), d = id.data;
+    for (var i = 0; i < d.length; i += 4) {
+      var min = Math.min(d[i], d[i+1], d[i+2]);
+      var v = min > 150 ? 0 : 255;
+      d[i]=d[i+1]=d[i+2]=v;
+    }
+    ctx.putImageData(id, 0, 0); return out;
+  }
+
+  // Otsu-Threshold: berechnet den Schwellwert automatisch durch
+  // Maximierung der Inter-Class-Varianz im Histogramm. Robust gegen
+  // ungewöhnliche Helligkeitsverteilungen (Foils, bunte Hintergründe).
+  function otsuBinarize(canvas) {
+    var out = document.createElement("canvas");
+    out.width = canvas.width; out.height = canvas.height;
+    var ctx = out.getContext("2d"); ctx.drawImage(canvas, 0, 0);
+    var id = ctx.getImageData(0, 0, out.width, out.height), d = id.data;
+    var hist = new Uint32Array(256), total = d.length / 4;
+    for (var i = 0; i < d.length; i += 4) {
+      var g = (0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2]) | 0;
+      hist[g]++;
+    }
+    var sum = 0; for (var k = 0; k < 256; k++) sum += k * hist[k];
+    var sumB = 0, wB = 0, varMax = -1, thresh = 127;
+    for (var t = 0; t < 256; t++) {
+      wB += hist[t]; if (!wB) continue;
+      var wF = total - wB; if (!wF) break;
+      sumB += t * hist[t];
+      var mB = sumB / wB, mF = (sum - sumB) / wF;
+      var v = wB * wF * (mB - mF) * (mB - mF);
+      if (v > varMax) { varMax = v; thresh = t; }
+    }
+    for (var i = 0; i < d.length; i += 4) {
+      var g = (0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2]) | 0;
+      var v = g > thresh ? 255 : 0;
+      d[i]=d[i+1]=d[i+2]=v;
+    }
+    ctx.putImageData(id, 0, 0); return out;
+  }
+
+  function adaptiveThreshold(src) {
+    // Grayscale zuerst
+    var gray = toGrayscale(src);
+    // Geblurrte Version als lokalen Mittelwert berechnen
+    var blr = document.createElement("canvas");
+    blr.width = gray.width; blr.height = gray.height;
+    var bCtx = blr.getContext("2d");
+    bCtx.filter = "blur(" + Math.max(2, Math.round(gray.width / 25)) + "px)";
+    bCtx.drawImage(gray, 0, 0); bCtx.filter = "none";
+    var orig = gray.getContext("2d").getImageData(0, 0, gray.width, gray.height);
+    var blur = bCtx.getImageData(0, 0, blr.width, blr.height);
+    var out = document.createElement("canvas");
+    out.width = gray.width; out.height = gray.height;
+    var oCtx = out.getContext("2d");
+    var oId = oCtx.createImageData(out.width, out.height);
+    for (var i = 0; i < orig.data.length; i += 4) {
+      var v = orig.data[i] < blur.data[i] - 6 ? 0 : 255;
+      oId.data[i]=oId.data[i+1]=oId.data[i+2]=v; oId.data[i+3]=255;
+    }
+    oCtx.putImageData(oId, 0, 0); return out;
+  }
+
+  // Bekannte Set-Größen aus dem Riftcodex-Cache (z.B. [219, 221, 298, ...])
+  // Wird beim ersten Aufruf einmalig berechnet und gecached.
+  var _knownSetTotals = null;
+  function getKnownSetTotals() {
+    if (_knownSetTotals) return _knownSetTotals;
+    if (!riftcodexCache || !riftcodexCache.length) return null;
+    var seen = {};
+    riftcodexCache.forEach(function(card) {
+      var s = card.number || "";
+      var rc = s.match(/^[a-z]+-\d+[a-z]?-(\d+)$/i);
+      if (rc) { seen[parseInt(rc[1], 10)] = true; return; }
+      var std = s.match(/^\d+\*?\/(\d+)/);
+      if (std) { seen[parseInt(std[1], 10)] = true; }
+    });
+    _knownSetTotals = Object.keys(seen).map(Number).sort(function(a,b){return a-b;});
+    return _knownSetTotals;
+  }
+
+  // Plausibilitätsprüfung: Müll-Treffer wie "1/51" aus Karten-Artwork
+  // oder Rarity-Sternen frühzeitig verwerfen.
+  // Wichtig: Overnumber-Karten (z.B. 309/298) sind GÜLTIG — die Nummer
+  // darf größer sein als die Gesamtanzahl. Wir erlauben bis zum 2-fachen.
+  function isPlausibleCardNumber(num, total) {
+    if (total < 100) return false;
+    if (num < 1) return false;
+    if (num > total * 2) return false; // 309/298 ok, 999/100 nicht
+    var known = getKnownSetTotals();
+    if (known && known.length) {
+      var nearKnown = known.some(function(t) { return Math.abs(t - total) <= 10; });
+      if (!nearKnown) return false;
+    }
+    return true;
+  }
+
+  // Extrahiert einen Set-Code (3 Großbuchstaben) aus einem Text
+  // Bevorzugt Codes die direkt vor einer Zahl stehen ("OGN 165/298")
+  function extractSetCode(text) {
+    if (!text) return null;
+    var nearNumber = text.match(/\b([A-Z]{3})[\s\-_]*\d/);
+    if (nearNumber) return nearNumber[1];
+    var any = text.match(/\b([A-Z]{3})\b/);
+    return any ? any[1] : null;
+  }
+
+  // Parst Kartennummer UND Set-Code (z.B. "OGN", "SFD") aus OCR-Text
+  // → { number: "165/298", setCode: "OGN" } oder null wenn keine Nummer gefunden
+  // Probiert ALLE Nummern-Treffer im Text durch — nimmt den ersten plausiblen.
+  // So wird "Stern 1/5 ... Nummer 165/298" nicht mehr als "1/5" missgelesen.
+  function parseCardInfo(text) {
+    var raw = text || "";
+    var setCode = extractSetCode(raw);
+    var t = raw.replace(/\s+/g, "")
+      .replace(/[oO]/g, "0").replace(/[lLI|]/g, "1").replace(/[bB]/g, "6");
+    var re = /(\d{1,4})[*xX]?\/(\d{1,4})/g, m;
+    while ((m = re.exec(t)) !== null) {
+      var num = parseInt(m[1], 10), tot = parseInt(m[2], 10);
+      if (isPlausibleCardNumber(num, tot)) {
+        return { number: m[1] + "/" + m[2], setCode: setCode };
+      }
+    }
+    return null;
+  }
+  // Rückwärtskompatibler Wrapper
+  function parseCardNumber(text) {
+    var info = parseCardInfo(text);
+    return info ? info.number : null;
+  }
+
+  // Sucht Kartennummer + Set-Code im unteren Teil des Bildes
+  // Rückgabe: { number, setCode } oder null
+  function findCardNumber(canvas) {
+    var W = canvas.width, H = canvas.height;
+    var stripY = Math.floor(H * 0.50);
+    var stripH = Math.floor(H * 0.48);
+
+    if (typeof TextDetector !== "undefined") {
+      var strip = cropAndScale(canvas, 0, stripY, W, stripH, 1);
+      return new TextDetector().detect(strip).then(function(texts) {
+        // Set-Code aus ALLEN gefundenen Textblöcken sammeln, nicht nur dem ersten
+        // Strikt 3 Großbuchstaben (vermeidet 2-Buchstaben-Fehltreffer wie "EN")
+        var setCode = null;
+        for (var j = 0; j < texts.length; j++) {
+          var sm = (texts[j].rawValue || "").match(/\b([A-Z]{3})\b/);
+          if (sm) { setCode = sm[1]; break; }
+        }
+        for (var i = 0; i < texts.length; i++) {
+          var info = parseCardInfo(texts[i].rawValue);
+          if (info) {
+            if (!info.setCode && setCode) info.setCode = setCode;
+            return info;
+          }
+        }
+        return null;
+      }).catch(function() { return null; }).then(function(info) {
+        return info || findCardNumberTesseract(canvas, W, H);
+      });
+    }
+    return findCardNumberTesseract(canvas, W, H);
+  }
+
+  // Cache der letzten Tesseract-PSM-Einstellung — vermeidet redundante setParameters-Aufrufe
+  var _lastTesseractPsm = null;
+  function applyPsm(worker, psm) {
+    if (_lastTesseractPsm === psm) return Promise.resolve(worker);
+    return worker.setParameters({ tessedit_pageseg_mode: psm }).then(function() {
+      _lastTesseractPsm = psm;
+      return worker;
+    });
+  }
+
+  function findCardNumberTesseract(canvas, W, H) {
+    if (typeof Tesseract === "undefined") return Promise.resolve(null);
+    // Gezielter Crop: unten-links, wo die Nummer auf TCG-Karten steht.
+    // Wichtig — Crop bewusst LARGER als nötig damit Ziffern am Rand nicht
+    // abgeschnitten werden (z.B. wenn Karte leicht verschoben liegt und
+    // das erste "2" außerhalb des engen Crops landet → wurde als "0" gelesen)
+    var nbX = Math.floor(W * 0.08);   // bisschen weiter links für Puffer
+    var nbW = Math.floor(W * 0.52);   // breiter — fängt schiefe Karten
+    var nbY = Math.floor(H * 0.78);   // bisschen höher für Puffer
+    var nbH = Math.floor(H * 0.15);   // höher
+    var nbScale = Math.max(1.5, Math.min(3, 800 / nbW));
+
+    var scBase = Math.max(1.5, Math.min(2.5, 1000 / W));
+    var _nb, _lo20, _lo50;
+    function nbCrop() { return _nb   || (_nb   = cropAndScale(canvas, nbX, nbY, nbW, nbH, nbScale)); }
+    function lo20()   { return _lo20 || (_lo20 = cropAndScale(canvas, 0, Math.floor(H * 0.78), W, Math.floor(H * 0.20), scBase)); }
+    function lo50()   { return _lo50 || (_lo50 = cropAndScale(canvas, 0, Math.floor(H * 0.50), W, Math.floor(H * 0.48), scBase)); }
+
+    // Mehr Versuche aber alle auf kleinen Crops → bleibt schnell.
+    // Reihenfolge: Common/Uncommon (einfache Karten) zuerst, dann Spezial-
+    // Preprocessings für Epic/Showcase mit buntem Hintergrund.
+    var attempts = [
+      { make: function() { return toGrayscale(nbCrop()); },       psm: "7" },
+      { make: function() { return binarize(nbCrop(), true);  },   psm: "7" }, // helle Schrift auf dunklem Footer
+      { make: function() { return isolateWhiteText(nbCrop()); },  psm: "7" }, // weißer Text auf buntem Bg (Epic/Showcase)
+      { make: function() { return otsuBinarize(nbCrop()); },      psm: "7" }, // auto-Threshold für schwierige Kontraste
+      { make: function() { return adaptiveThreshold(nbCrop()); }, psm: "7" },
+      { make: function() { return isolateWhiteText(lo20()); },    psm: "7" }, // breiterer Crop falls Karte verschoben
+      { make: function() { return toGrayscale(lo20()); },         psm: "7" },
+      { make: function() { return toGrayscale(lo50()); },         psm: "11" }
+    ];
+    return getOCRWorker().then(function(worker) {
+      // Within-Frame-Konsens: eine Nummer wird "strong" wenn ZWEI verschiedene
+      // Preprocessing-Varianten dasselbe lesen. Schützt gegen systematische
+      // OCR-Fehler (z.B. "242" immer als "042" weil erstes "2" am Crop-Rand).
+      // Hat ein Frame eine "strong"-Lesung → wird sofort bestätigt (kein
+      // zweiter Frame nötig). Eine "weak" Einzellesung wandert in den Multi-
+      // Frame-Buffer für die übliche 2×-Bestätigung.
+      var allReads = [];
+      var aggregateSetCode = null;
+
+      function next(i) {
+        if (i >= attempts.length) {
+          if (allReads.length === 1) {
+            var only = allReads[0];
+            if (!only.setCode && aggregateSetCode) only.setCode = aggregateSetCode;
+            only.strong = false;
+            return only;
+          }
+          return null;
+        }
+        var a = attempts[i];
+        return applyPsm(worker, a.psm)
+          .then(function() { return worker.recognize(a.make()); })
+          .then(function(r) {
+            var text = r.data.text || "";
+            var sc = extractSetCode(text);
+            if (sc && !aggregateSetCode) aggregateSetCode = sc;
+            var info = parseCardInfo(text);
+            if (info) {
+              for (var j = 0; j < allReads.length; j++) {
+                if (allReads[j].number === info.number) {
+                  info.setCode = info.setCode || allReads[j].setCode || aggregateSetCode;
+                  info.strong = true; // Within-Frame-Konsens erreicht
+                  return info;
+                }
+              }
+              allReads.push(info);
+            }
+            return next(i + 1);
+          })
+          .catch(function() { return next(i + 1); });
+      }
+      return next(0);
+    }).catch(function() { return null; });
+  }
+
+  function identifyCardOCR(imageUrl) {
+    return new Promise(function(resolve, reject) {
+      var img = new Image();
+      img.onload = function() {
+        var W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
+        if (!W || !H) { reject(new Error("Bild nicht ladbar")); return; }
+        var canvas = document.createElement("canvas");
+        canvas.width = W; canvas.height = H;
+        canvas.getContext("2d").drawImage(img, 0, 0);
+        findCardNumber(canvas).then(function(number) {
+          resolve({
+            game: "riftbound", name: "", number: number || "",
+            confidence: number ? "medium" : "low",
+            notes: number ? "" : "Nummer nicht lesbar — Karte schärfer halten"
+          });
+        });
+      };
+      img.onerror = function() { reject(new Error("Bild konnte nicht geladen werden")); };
+      img.src = imageUrl;
+    });
+  }
+
+  function mapRiftcodexCard(card) {
+    var num = card.riftbound_id || card.number || card.card_number || card.collector_number || "";
+    // Variantenerkennung aus riftbound_id-Format "prefix-NNN[x]-total":
+    // Buchstabensuffix nach Nummer (z.B. "060a") = Sondervariante (Alt Art, Signature…)
+    var hasLetterSuffix = /^[a-z]+-\d+[a-z]+-\d+$/i.test(num) ||  // "uni-060aa-219"
+                          /^[a-z]+-\d+[a-z]-\d+$/i.test(num);      // "uni-060a-219"
+    var hasOvernumberedMark = num.indexOf("*") !== -1;
+    return {
+      riftcodexId: card.id,
+      name: card.name,
+      number: num,
+      set: (card.set && card.set.label) || "",
+      setId: (card.set && card.set.set_id) || "",
+      rarity: (card.classification && card.classification.rarity) || "",
+      imageUrl: (card.media && card.media.image_url) || "",
+      isPromo: !!(card.set && card.set.set_id === "OPP"),
+      isAltArt: !!(card.metadata && card.metadata.alternate_art) || hasLetterSuffix,
+      isOvernumbered: !!(card.metadata && card.metadata.overnumbered) || hasOvernumberedMark,
+      isSignature: !!(card.metadata && card.metadata.signature)
+    };
+  }
+
+  function loadRiftcodexCache() {
+    if (riftcodexCache) return Promise.resolve(riftcodexCache);
+    if (riftcodexCachePromise) return riftcodexCachePromise;
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY_RCACHE);
+      if (raw) { riftcodexCache = JSON.parse(raw); return Promise.resolve(riftcodexCache); }
+    } catch (e) {}
+    // Paginiert laden (API erlaubt max. size=100)
+    riftcodexCachePromise = fetch(RIFTCODEX_BASE + "/cards?size=100&page=1")
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var allItems = (data.items || []);
+        var totalPages = data.pages || 1;
+        if (totalPages <= 1) return allItems;
+        var pagePromises = [];
+        for (var p = 2; p <= totalPages; p++) {
+          pagePromises.push(
+            fetch(RIFTCODEX_BASE + "/cards?size=100&page=" + p)
+              .then(function (r) { return r.json(); })
+              .then(function (d) { return d.items || []; })
+              .catch(function () { return []; })
+          );
+        }
+        return Promise.all(pagePromises).then(function (pages) {
+          pages.forEach(function (pg) { allItems = allItems.concat(pg); });
+          return allItems;
+        });
+      })
+      .then(function (allItems) {
+        // Rohdaten-Sample für Diagnose speichern
+        if (allItems.length > 0) window._riftRawSample = allItems[0];
+        riftcodexCache = allItems.map(mapRiftcodexCard);
+        window._riftWithNumber = riftcodexCache.filter(function(c) { return !!c.number; }).length;
+        try { localStorage.setItem(STORAGE_KEY_RCACHE, JSON.stringify(riftcodexCache)); } catch (e) {}
+        riftcodexCachePromise = null;
+        return riftcodexCache;
+      })
+      .catch(function () {
+        riftcodexCachePromise = null;
+        return [];
+      });
+    return riftcodexCachePromise;
+  }
+
+  function searchRiftboundByNumber(number, setCode) {
+    if (!number) return Promise.resolve([]);
+    var m = number.match(/(\d+)(\*?)\/(\d+)/);
+    if (!m) return Promise.resolve([]);
+    var baseNum  = parseInt(m[1], 10);
+    var hasStar  = m[2] === "*";
+    var totalNum = parseInt(m[3], 10);
+    var setCodeUp = setCode ? setCode.toUpperCase() : null;
+
+    return loadRiftcodexCache().then(function (cache) {
+      // Riftcodex-Format: "uni-060a-219"  ↔  Karte: "060/221"
+      function parseParts(str) {
+        if (!str) return null;
+        var rc = str.match(/^[a-z]+-(\d+)[a-z]?-(\d+)$/i);
+        if (rc) return { num: parseInt(rc[1], 10), total: parseInt(rc[2], 10) };
+        var std = str.match(/^(\d+)(\*?)\/(\d+)/);
+        if (std) return { num: parseInt(std[1], 10), total: parseInt(std[3], 10) };
+        return null;
+      }
+
+      // Alle Karten mit exakt dieser Kartennummer (aus allen Sets)
+      var byNum = cache.filter(function (card) {
+        var p = parseParts(card.number);
+        return p && p.num === baseNum;
+      });
+      if (byNum.length === 0) {
+        window._lastSearchDiag = { number: number, setCode: setCode, matchedSet: null, reason: "Nummer nicht im Cache" };
+        return [];
+      }
+
+      // ----- Set-Code Pfad (strikter, weniger fehleranfällig) -----
+      // Wenn ein Set-Code gelesen wurde UND ein Set in der Datenbank exakt passt
+      // → ausschließlich Karten aus diesem Set zurückgeben, ohne Total-Filter.
+      // Das ist die zuverlässigste Disambiguierung wenn der Code korrekt ist.
+      if (setCodeUp) {
+        var bySet = byNum.filter(function (card) {
+          var sid = (card.setId || "").toUpperCase();
+          return sid === setCodeUp;
+        });
+        if (bySet.length > 0) {
+          window._lastSearchDiag = {
+            number: number, setCode: setCode,
+            matchedSet: setCodeUp, reason: "Set-Code exakt gematched",
+            candidateCount: bySet.length
+          };
+          return sortByOvernumber(bySet, hasStar);
+        }
+        // Set-Code gelesen aber kein Match → könnte OCR-Fehler beim Code sein
+        // (z.B. "OCN" statt "OGN"). Weiter mit Total-basiertem Fallback,
+        // aber Diagnose merken.
+      }
+
+      // ----- Total-basierter Pfad (Fallback ohne Set-Code) -----
+      // Bevorzuge IMMER das Set mit exaktem Total-Match. Nur wenn OCR die
+      // Gesamtzahl unscharf gelesen hat (bestDiff > 0) ein zweites Set
+      // innerhalb ±2 noch zulassen.
+      var totals = {};
+      byNum.forEach(function (card) {
+        var p = parseParts(card.number);
+        if (p) totals[p.total] = (totals[p.total] || 0) + 1;
+      });
+      var bestTotal = null, bestDiff = Infinity;
+      Object.keys(totals).forEach(function (t) {
+        var d = Math.abs(parseInt(t, 10) - totalNum);
+        if (d < bestDiff) { bestDiff = d; bestTotal = parseInt(t, 10); }
+      });
+      // Sicherheit: wenn nächstes Set extrem weit weg (>15) → OCR-Fehler
+      if (bestDiff > 15) {
+        window._lastSearchDiag = {
+          number: number, setCode: setCode, matchedSet: null,
+          reason: "Kein Set in Nähe von Total " + totalNum + " (min Abstand " + bestDiff + ")"
+        };
+        return [];
+      }
+
+      var includedTotals = [bestTotal];
+      if (bestDiff > 0) {
+        Object.keys(totals).forEach(function (t) {
+          var tNum = parseInt(t, 10);
+          if (tNum === bestTotal) return;
+          if (Math.abs(tNum - totalNum) <= 2) includedTotals.push(tNum);
+        });
+      }
+
+      var results = byNum.filter(function (card) {
+        var p = parseParts(card.number);
+        return p && includedTotals.indexOf(p.total) !== -1;
+      });
+
+      if (results.length > 8) {
+        window._lastSearchDiag = {
+          number: number, setCode: setCode, matchedSet: null,
+          reason: "Zu viele Treffer (" + results.length + ") — wahrscheinlich OCR-Fehler"
+        };
+        return [];
+      }
+
+      window._lastSearchDiag = {
+        number: number, setCode: setCode || "(nicht gelesen)",
+        matchedSet: "Total " + includedTotals.join("/") + (bestDiff === 0 ? " (exakt)" : " (±" + bestDiff + ")"),
+        reason: setCodeUp ? "Set-Code passte nicht — Fallback auf Total" : "Nur Total (kein Set-Code gelesen)",
+        candidateCount: results.length
+      };
+      return sortByOvernumber(results, hasStar);
+    });
+  }
+
+  function sortByOvernumber(results, hasStar) {
+    return results.slice().sort(function (a, b) {
+      var aStar = (a.number || "").indexOf("*") !== -1 ? 1 : 0;
+      var bStar = (b.number || "").indexOf("*") !== -1 ? 1 : 0;
+      return hasStar ? bStar - aStar : aStar - bStar;
+    });
+  }
+
+  function searchRiftboundCards(query) {
+    if (!query || !query.trim()) return Promise.resolve([]);
+    var url = RIFTCODEX_BASE + "/cards/name?fuzzy=" + encodeURIComponent(query.trim()) + "&size=12";
+    return fetch(url).then(function (response) {
+      if (!response.ok) throw new Error("Riftcodex-Anfrage fehlgeschlagen");
+      return response.json();
+    }).then(function (data) {
+      return (data.items || []).map(function (card) {
+        return {
+          riftcodexId: card.id,
+          name: card.name,
+          number: card.riftbound_id,
+          set: (card.set && card.set.label) || "",
+          setId: (card.set && card.set.set_id) || "",
+          type: (card.classification && card.classification.type) || "",
+          rarity: (card.classification && card.classification.rarity) || "",
+          imageUrl: (card.media && card.media.image_url) || "",
+          isPromo: !!(card.set && card.set.set_id === "OPP"),
+          isAltArt: !!(card.metadata && card.metadata.alternate_art),
+          isOvernumbered: !!(card.metadata && card.metadata.overnumbered)
+        };
+      });
+    });
+  }
+
+  // preResult ist optional – wird vom Live-Scan übergeben wenn die Nummer
+  // schon per OCR auf dem Canvas gelesen wurde (spart doppelte Erkennung)
+  function addToQueue(file, preResult) {
+    if (!file) return;
+    var previewUrl = URL.createObjectURL(file);
+    var entryId = uid();
+
+    queue.unshift({
+      id: entryId, status: "analyzing", previewUrl: previewUrl, cardImageUrl: "",
+      game: "unknown", name: "", set: "", number: "", rarity: "",
+      foil: foilMode === "foilOnly", language: "EN", condition: "Near Mint",
+      quantity: 1, notes: "", confidence: "medium", candidates: [], selectedCandidate: null,
+      uncertainFields: []
+    });
+    renderQueue();
+
+    var resultPromise = preResult
+      ? Promise.resolve(preResult)
+      : identifyCardOCR(previewUrl);
+
+    resultPromise.then(function (result) {
+      var foilValue = foilMode === "foilOnly" ? true : foilMode === "nonFoilOnly" ? false : false;
+      var candidatesPromise = result.number
+        ? searchRiftboundByNumber(result.number, result.setCode).catch(function () { return []; })
+        : Promise.resolve([]);
+
+      return candidatesPromise.then(function (candidates) {
+        var entry = queue.filter(function (e) { return e.id === entryId; })[0];
+        if (entry) {
+          // Basis-Felder setzen (werden ggf. unten überschrieben)
+          entry.game = "riftbound";
+          entry.number = result.number || "";
+          entry.foil = foilValue; entry.language = "EN";
+          entry.confidence = result.confidence || "medium";
+          entry.uncertainFields = [];
+
+          if (candidates.length === 0) {
+            entry.status = "error";
+            entry.name = ""; entry.set = ""; entry.rarity = "";
+            entry.candidates = []; entry.selectedCandidate = null; entry.cardImageUrl = "";
+            entry.errorMessage = result.number
+              ? "Nummer " + result.number + " nicht gefunden — ✎ manuell"
+              : "Nummer nicht lesbar — ✎ manuell eintragen";
+          } else {
+            // Schritt 1: Filter (Promo, Overnumber, Alt Art) eingrenzen
+            var anyFilter = specialFilters.overnumber || specialFilters.altArt || specialFilters.promo;
+            var filtered = candidates;
+            if (anyFilter) {
+              var narrow = candidates.filter(function (c) {
+                if (specialFilters.overnumber && !c.isOvernumbered) return false;
+                if (specialFilters.altArt     && !c.isAltArt)      return false;
+                if (specialFilters.promo      && !c.isPromo)        return false;
+                return true;
+              });
+              if (narrow.length > 0) filtered = narrow;
+            }
+
+            // Schritt 2: Wenn immer noch mehrere → Basiskarte bevorzugen
+            // (nicht Promo, nicht AltArt, nicht Overnumbered, nicht Signature)
+            if (filtered.length > 1) {
+              var base = filtered.filter(function (c) {
+                return !c.isPromo && !c.isAltArt && !c.isOvernumbered && !c.isSignature;
+              });
+              if (base.length === 1) filtered = base;
+            }
+
+            if (filtered.length === 1) {
+              // Eindeutig → automatisch bestätigen
+              var ac = filtered[0];
+              entry.status = "ready";
+              entry.name = ac.name; entry.set = ac.set;
+              entry.number = ac.number; entry.rarity = ac.rarity;
+              entry.candidates = [ac]; entry.selectedCandidate = ac; entry.cardImageUrl = ac.imageUrl;
+            } else {
+              // Mehrdeutig → Auswahl anzeigen, Filter-Treffer oben
+              filtered.sort(function (a, b) {
+                var sA = 0, sB = 0;
+                if (specialFilters.overnumber) { sA += a.isOvernumbered ? 1 : 0; sB += b.isOvernumbered ? 1 : 0; }
+                if (specialFilters.altArt)     { sA += a.isAltArt ? 1 : 0;      sB += b.isAltArt ? 1 : 0; }
+                if (specialFilters.promo)      { sA += a.isPromo ? 1 : 0;       sB += b.isPromo ? 1 : 0; }
+                return sB - sA;
+              });
+              entry.status = "needs_selection";
+              entry.name = ""; entry.set = ""; entry.rarity = "";
+              entry.candidates = filtered; entry.selectedCandidate = null; entry.cardImageUrl = "";
+            }
+          }
+        }
+        renderQueue();
+        liveBusy = false;
+        setLiveStatusPill("Karte ruhig vor die Kamera halten", false);
+      });
+    }).catch(function (e) {
+      console.error(e);
+      var entry = queue.filter(function (en) { return en.id === entryId; })[0];
+      if (entry) { entry.status = "error"; entry.confidence = "low"; entry.errorMessage = e.message || "Fehler"; }
+      renderQueue();
+      liveBusy = false;
+      setLiveStatusPill("Karte ruhig vor die Kamera halten", false);
+    });
+  }
+
+  function selectCandidate(entryId, candidate) {
+    var entry = queue.filter(function (e) { return e.id === entryId; })[0];
+    if (!entry) return;
+    entry.status = "ready";
+    entry.name = candidate.name;
+    entry.set = candidate.set;
+    entry.number = candidate.number;
+    entry.rarity = candidate.rarity;
+    entry.selectedCandidate = candidate;
+    entry.cardImageUrl = candidate.imageUrl;
+    renderQueue();
+  }
+
+  function removeFromQueue(id) {
+    queue = queue.filter(function (e) { return e.id !== id; });
+    if (editingQueueId === id) editingQueueId = null;
+    renderQueue();
+  }
+
+  function saveAllReady() {
+    var readyEntries = queue.filter(function (e) { return e.status === "ready" && e.name.trim(); });
+    if (readyEntries.length === 0) return;
+    var newCards = readyEntries.map(function (entry) {
+      return {
+        id: entry.id, game: entry.game, name: entry.name, set: entry.set, number: entry.number,
+        rarity: entry.rarity, foil: entry.foil, language: entry.language, condition: entry.condition,
+        quantity: entry.quantity, notes: entry.notes, previewUrl: entry.cardImageUrl || entry.previewUrl,
+        createdAt: Date.now()
+      };
+    });
+    cards = newCards.concat(cards);
+    queue = queue.filter(function (e) { return !(e.status === "ready" && e.name.trim()); });
+    saveCards();
+    renderQueue();
+    renderHeaderCount();
+  }
+
+  function deleteCard(id) {
+    cards = cards.filter(function (c) { return c.id !== id; });
+    saveCards();
+    renderCollection();
+    renderHeaderCount();
+  }
+
+  function startLiveScan() {
+    hideLiveError();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showLiveError("Dieser Browser unterstützt keinen Kamera-Zugriff über getUserMedia. Nutze stattdessen Foto/Galerie unten.");
+      return;
+    }
+    // Höchstmögliche Auflösung anfordern — moderne Handys liefern 1080p–4K
+    // Der Browser wählt automatisch das beste Match das die Kamera kann.
+    // KEINE expliziten focus/whiteBalance/exposure-Constraints — Browser-Default
+    // ist auf Android Chrome bereits "continuous", explizite Constraints haben
+    // auf manchen Geräten den AF in einen schlechteren Modus gezwungen.
+    navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: "environment",
+        width:  { ideal: 3840 },
+        height: { ideal: 2160 },
+        frameRate: { ideal: 30 }
+      },
+      audio: false
+    }).then(function (stream) {
+      liveStream = stream;
+      var video = document.getElementById("live-video");
+      video.srcObject = stream;
+
+      // Tatsächliche Auflösung in Konsole loggen + im Video-Overlay anzeigen
+      var track = stream.getVideoTracks()[0];
+      if (track && track.getSettings) {
+        var s = track.getSettings();
+        var info = (s.width || "?") + "×" + (s.height || "?") +
+                   " · " + Math.round(s.frameRate || 0) + "fps";
+        console.log("[Kamera] aktiv:", info, "Fokus:", s.focusMode || "auto");
+        var infoEl = document.getElementById("live-cam-info");
+        if (infoEl) infoEl.textContent = info;
+      }
+
+      // Taschenlampe nur anbieten wenn die Kamera sie wirklich unterstützt
+      // (Android Chrome ja, iOS Safari nein, manche Frontkameras nein)
+      liveTorchTrack = track;
+      liveTorchOn = false;
+      liveTorchMode = "off";
+      var torchBtn = document.getElementById("live-torch-btn");
+      var caps = track && track.getCapabilities ? track.getCapabilities() : null;
+      if (torchBtn) {
+        if (caps && caps.torch) {
+          torchBtn.classList.remove("hidden");
+          torchBtn.classList.remove("on");
+          torchBtn.textContent = "Blitz aus";
+        } else {
+          torchBtn.classList.add("hidden");
+        }
+      }
+
+      // Tap-to-Focus auf das Live-Bild — bessere Schärfe bei Nahaufnahmen
+      setupTapToFocus(video, track);
+      // Auto-Fokus standardmäßig auf den Nummern-Bereich (unten-links)
+      // Erst nach kurzer Verzögerung damit Kamera initialisiert ist
+      setTimeout(function() { applyNumberAreaFocus(track); }, 600);
+
+      // Wenn der Kamera-Track von außen beendet wird (z.B. Anruf kommt rein,
+      // eine andere App übernimmt die Kamera, Nutzer entzieht die Berechtigung
+      // nachträglich), merkt die App das jetzt aktiv und zeigt es klar an,
+      // statt nur ein eingefrorenes letztes Bild stehen zu lassen.
+      stream.getVideoTracks().forEach(function (track) {
+        track.onended = function () {
+          showLiveError("Die Kamera-Verbindung wurde unterbrochen (z.B. durch eine andere App oder einen Anruf). Tippe erneut auf 'Live-Scan starten', um sie wieder aufzunehmen.");
+          stopLiveScan();
+        };
+      });
+
+      return video.play();
+    }).then(function () {
+      liveActive = true;
+      document.getElementById("live-scan-start-btn").classList.add("hidden");
+      document.getElementById("live-video-section").classList.remove("hidden");
+      liveInterval = setInterval(captureLiveFrame, 1000);
+    }).catch(function (e) {
+      console.error(e);
+      var name = (e && e.name) ? e.name : "UnknownError";
+      var detail;
+      if (name === "NotAllowedError") {
+        detail = "Kamera-Zugriff wurde verweigert. Bitte erlaube den Zugriff in den Browser-Einstellungen für diese Seite und versuch es erneut.";
+        liveCameraBlocked = true;
+      } else if (name === "NotFoundError") {
+        detail = "Es wurde keine Kamera gefunden.";
+      } else if (name === "NotReadableError") {
+        detail = "Die Kamera wird gerade von einer anderen App benutzt.";
+      } else {
+        detail = "Unbekannter Fehler beim Kamera-Zugriff.";
+      }
+      showLiveError(detail + " (" + name + ")");
+      if (liveCameraBlocked) {
+        document.getElementById("live-scan-start-btn").classList.add("hidden");
+        document.getElementById("fallback-photo-section").classList.remove("hidden");
+        document.getElementById("fallback-photo-details").classList.add("hidden");
+      }
+    });
+  }
+
+  // Wenn die Seite aus dem Hintergrund zurückkommt (Tab-Wechsel, Bildschirm
+  // entsperrt), prüfen wir ob der Stream noch lebt - viele Mobil-Browser
+  // pausieren oder beenden Kamera-Streams automatisch im Hintergrund, ohne
+  // ein 'ended'-Event zu feuern. Das stellt sicher, dass "dauerhaft" auch
+  // wirklich dauerhaft gemeint ist, nicht nur "bis zum nächsten Tab-Wechsel".
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState !== "visible") return;
+    if (!liveActive || !liveStream) return;
+    var stillLive = liveStream.getVideoTracks().some(function (t) { return t.readyState === "live"; });
+    if (!stillLive) {
+      showLiveError("Die Kamera wurde im Hintergrund pausiert. Starte den Live-Scan neu, um weiterzumachen.");
+      stopLiveScan();
+      return;
+    }
+    var video = document.getElementById("live-video");
+    if (video && video.paused) {
+      video.play().catch(function () { /* nicht kritisch, nächster Capture-Versuch prüft readyState ohnehin */ });
+    }
+  });
+
+  function stopLiveScan() {
+    if (liveInterval) { clearInterval(liveInterval); liveInterval = null; }
+    if (liveTorchTrack && liveTorchOn) {
+      try { liveTorchTrack.applyConstraints({ advanced: [{ torch: false }] }); } catch(e){}
+    }
+    if (liveStream) { liveStream.getTracks().forEach(function (t) { t.stop(); }); liveStream = null; }
+    liveActive = false;
+    liveTorchTrack = null; liveTorchOn = false; liveTorchMode = "off";
+    liveRecentReads = [];
+    var tb = document.getElementById("live-torch-btn");
+    if (tb) { tb.classList.add("hidden"); tb.classList.remove("on"); tb.textContent = "Blitz aus"; }
+    var diag = document.getElementById("live-scan-diag");
+    if (diag) { diag.textContent = ""; diag.classList.add("hidden"); }
+    document.getElementById("live-video-section").classList.add("hidden");
+    if (!liveCameraBlocked) document.getElementById("live-scan-start-btn").classList.remove("hidden");
+    setLiveStatusPill("Karte ruhig vor die Kamera halten", false);
+  }
+
+  // Blitz-Hardware: physikalisch ein-/ausschalten
+  function torchSet(on) {
+    if (!liveTorchTrack || !liveTorchTrack.applyConstraints) return Promise.resolve();
+    return liveTorchTrack.applyConstraints({ advanced: [{ torch: !!on }] })
+      .then(function() { liveTorchOn = !!on; })
+      .catch(function(err) { console.warn("[Blitz] nicht möglich:", err); });
+  }
+
+  // Drei Modi durchwechseln: aus → nur beim Scan → Dauer → aus
+  function cycleTorch() {
+    if (!liveTorchTrack) return;
+    var next = liveTorchMode === "off"  ? "scan"
+             : liveTorchMode === "scan" ? "on"
+             : "off";
+    liveTorchMode = next;
+    var btn = document.getElementById("live-torch-btn");
+    if (btn) {
+      btn.classList.toggle("on", next !== "off");
+      btn.textContent = next === "off"  ? "Blitz aus"
+                      : next === "scan" ? "Blitz: Scan"
+                      : "Blitz: Dauer";
+    }
+    // Dauer = jetzt an, sonst aus (Scan-Modus zündet pro Capture eigenständig)
+    torchSet(next === "on");
+  }
+
+  // Setzt den Kamera-Fokus automatisch auf den Bereich wo die Kartennummer
+  // sitzt (unten links innerhalb der Guide-Box). Wird beim Start und zyklisch
+  // vor jedem Capture aufgerufen — Fokus bleibt damit auf der Nummer
+  // statt durch Continuous-AF zwischen Karten-Hintergrund und Footer zu wandern.
+  function applyNumberAreaFocus(track) {
+    if (!track || !track.applyConstraints) return Promise.resolve();
+    var caps = track.getCapabilities ? track.getCapabilities() : {};
+    var adv = {};
+    // Position des Nummern-Bereichs (passt zum gelben Fokus-Anker im UI):
+    // x ≈ 22% (links innerhalb des Karten-Rahmens), y ≈ 82% (unteres Drittel)
+    if (caps.pointsOfInterest) adv.pointsOfInterest = [{ x: 0.22, y: 0.82 }];
+    if (caps.focusMode) {
+      if (caps.focusMode.indexOf("continuous") !== -1) adv.focusMode = "continuous";
+      else if (caps.focusMode.indexOf("single-shot") !== -1) adv.focusMode = "single-shot";
+    }
+    if (caps.focusDistance) {
+      // Manche Geräte erlauben einen Nähe-Hint: leicht in Richtung Minimum
+      var min = caps.focusDistance.min, max = caps.focusDistance.max;
+      if (typeof min === "number" && typeof max === "number") {
+        adv.focusDistance = min + (max - min) * 0.15; // Richtung Makro
+      }
+    }
+    if (!Object.keys(adv).length) return Promise.resolve();
+    return track.applyConstraints({ advanced: [adv] }).catch(function(err) {
+      console.warn("[AutoFokus] nicht setzbar:", err);
+    });
+  }
+
+  // Tap-to-Focus: tippe ins Live-Bild, Kamera fokussiert auf diesen Punkt
+  function setupTapToFocus(video, track) {
+    if (!video) return;
+    var caps = track && track.getCapabilities ? track.getCapabilities() : null;
+    var supportsPOI = caps && caps.pointsOfInterest;
+    var supportsFocusMode = caps && caps.focusMode && caps.focusMode.indexOf("single-shot") !== -1;
+    video.onclick = function(e) {
+      var rect = video.getBoundingClientRect();
+      var nx = (e.clientX - rect.left) / rect.width;
+      var ny = (e.clientY - rect.top) / rect.height;
+      showFocusReticle(e.clientX - rect.left, e.clientY - rect.top);
+      if (!track || !track.applyConstraints) return;
+      var adv = {};
+      if (supportsPOI) adv.pointsOfInterest = [{ x: nx, y: ny }];
+      if (supportsFocusMode) adv.focusMode = "single-shot";
+      if (!supportsPOI && !supportsFocusMode) return; // Reticle wurde trotzdem gezeigt — visuelles Feedback
+      track.applyConstraints({ advanced: [adv] }).catch(function(err) {
+        console.warn("[Fokus] nicht setzbar:", err);
+      });
+    };
+  }
+  function showFocusReticle(x, y) {
+    var wrap = document.querySelector(".live-video-wrap");
+    if (!wrap) return;
+    var el = document.createElement("div");
+    el.className = "live-focus-reticle";
+    el.style.left = (x - 30) + "px";
+    el.style.top  = (y - 30) + "px";
+    wrap.appendChild(el);
+    setTimeout(function() { el.remove(); }, 700);
+  }
+
+  function setLiveStatusPill(text, capturing) {
+    var pill = document.getElementById("live-status-pill");
+    pill.textContent = text;
+    pill.classList.toggle("capturing", !!capturing);
+  }
+
+  function captureLiveFrame() {
+    if (liveBusy) return;
+    var video = document.getElementById("live-video");
+    var canvas = document.getElementById("live-canvas");
+    if (!video || video.readyState < 2) return;
+
+    liveBusy = true;
+
+    function doCaptureAndOCR() {
+      // Hohe Kamera-Auflösung auf sinnvolle OCR-Größe runterskalieren
+      // (1400px Breite ist mehr als genug für Kartennummern, OCR bleibt schnell)
+      var vw = video.videoWidth, vh = video.videoHeight;
+      var maxW = 1400;
+      var scale = vw > maxW ? maxW / vw : 1;
+      canvas.width  = Math.round(vw * scale);
+      canvas.height = Math.round(vh * scale);
+      canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      // Scan-Modus: Blitz direkt nach dem Capture wieder aus —
+      // OCR braucht kein Licht mehr, das passiert auf dem Canvas
+      if (liveTorchMode === "scan") torchSet(false);
+
+      setLiveStatusPill("Lese Nummer …", true);
+      return runOcrOnCanvas();
+    }
+
+    // Scan-Modus: Blitz kurz vor dem Capture an, ~180ms warten damit
+    // die Belichtungs-Automatik sich auf das hellere Bild einstellt
+    if (liveTorchMode === "scan") {
+      torchSet(true).then(function() {
+        setTimeout(doCaptureAndOCR, 180);
+      });
+      return;
+    }
+    doCaptureAndOCR();
+  }
+
+  function runOcrOnCanvas() {
+    var canvas = document.getElementById("live-canvas");
+
+    findCardNumber(canvas).then(function(info) {
+      if (!info || !info.number) {
+        // OCR fehlgeschlagen — Buffer wird NICHT geleert, frühere Lesungen
+        // bleiben erhalten bis zur TTL. Status zeigt aktuellen Buffer-Stand.
+        var pending = getMostPromisingPending();
+        if (pending) {
+          setLiveStatusPill(pending.label + " (" + pending.count + "× — warte auf " + REQUIRED_AGREEMENT + "×)", true);
+          updateScanDiag(null,
+            "Aktueller Versuch: keine Nummer gelesen\n" +
+            "Bisher: " + pending.label + " (" + pending.count + "/" + REQUIRED_AGREEMENT + ")",
+            "warn");
+        } else {
+          setLiveStatusPill("Keine Nummer erkannt — Karte ruhig halten", false);
+          updateScanDiag(null, "Keine Nummer im Bild gefunden", "warn");
+        }
+        liveBusy = false;
+        return;
+      }
+
+      // Lesung in den Konsens-Buffer aufnehmen
+      rememberRead(info);
+      // "strong" Lesung (Within-Frame-Konsens) bestätigt sofort, keine zweite
+      // Frame-Bestätigung nötig. Eine "weak" Einzellesung braucht 2× im Buffer.
+      var confirmed = info.strong
+        ? { number: info.number, setCode: info.setCode || null }
+        : findConfirmedRead();
+
+      if (!confirmed) {
+        // Erst eine einzelne Lesung — auf Bestätigung warten
+        var label = info.setCode ? info.setCode + " " + info.number : info.number;
+        var count = countReads(info.number);
+        setLiveStatusPill(label + " (" + count + "× — warte auf " + REQUIRED_AGREEMENT + "×)", true);
+        updateScanDiag(info,
+          "Lese: " + label + "  (Bestätigung " + count + "/" + REQUIRED_AGREEMENT + ")\n" +
+          "Mehrere Frames müssen die selbe Nummer liefern bevor übernommen wird",
+          "warn");
+        liveBusy = false;
+        return;
+      }
+
+      // Bestätigt durch mehrfache übereinstimmende Lesung → übernehmen
+      liveRecentReads = []; // Buffer leeren für nächste Karte
+      var confirmedLabel = confirmed.setCode ? confirmed.setCode + " " + confirmed.number : confirmed.number;
+      setLiveStatusPill("Bestätigt: " + confirmedLabel, true);
+
+      canvas.toBlob(function(blob) {
+        if (!blob) { liveBusy = false; return; }
+        var file = new File([blob], "live-" + Date.now() + ".jpg", { type: "image/jpeg" });
+        addToQueue(file, { number: confirmed.number, setCode: confirmed.setCode });
+        setTimeout(function() {
+          var diag = window._lastSearchDiag;
+          if (!diag) { updateScanDiag(confirmed, "Suche läuft …", null); return; }
+          var ok = diag.matchedSet && diag.candidateCount === 1;
+          var line = "Bestätigt: " + (confirmed.setCode || "—") + " " + confirmed.number +
+                     " → " + (diag.matchedSet || "kein Match") +
+                     (diag.candidateCount ? "  (" + diag.candidateCount + " Treffer)" : "");
+          var detail = diag.reason || "";
+          updateScanDiag(confirmed, line + (detail ? "\n" + detail : ""), ok ? "ok" : "warn");
+        }, 200);
+      }, "image/jpeg", 0.92);
+    }).catch(function() {
+      setLiveStatusPill("Karte ruhig vor die Kamera halten", false);
+      updateScanDiag(null, "OCR-Fehler", "err");
+      liveBusy = false;
+    });
+  }
+
+  function rememberRead(info) {
+    liveRecentReads.unshift({
+      number: info.number,
+      setCode: info.setCode || null,
+      ts: Date.now()
+    });
+    if (liveRecentReads.length > READ_BUFFER_MAX) liveRecentReads.length = READ_BUFFER_MAX;
+  }
+
+  function countReads(number) {
+    var now = Date.now();
+    return liveRecentReads.filter(function(r) {
+      return r.number === number && now - r.ts < READ_TTL_MS;
+    }).length;
+  }
+
+  // Häufigste Lesung im Buffer — für Status-Anzeige bei fehlgeschlagenem OCR
+  // damit User sieht "ich hab 309/298 schonmal gehört, warte auf Bestätigung"
+  function getMostPromisingPending() {
+    var now = Date.now();
+    var valid = liveRecentReads.filter(function(r) { return now - r.ts < READ_TTL_MS; });
+    if (!valid.length) return null;
+    var counts = {};
+    valid.forEach(function(r) { counts[r.number] = (counts[r.number] || 0) + 1; });
+    var bestNum = null, bestN = 0;
+    for (var n in counts) { if (counts[n] > bestN) { bestN = counts[n]; bestNum = n; } }
+    if (!bestNum) return null;
+    var bestSetCode = null;
+    valid.forEach(function(r) { if (r.number === bestNum && r.setCode && !bestSetCode) bestSetCode = r.setCode; });
+    return {
+      number: bestNum,
+      setCode: bestSetCode,
+      count: bestN,
+      label: bestSetCode ? bestSetCode + " " + bestNum : bestNum
+    };
+  }
+
+  // Sucht im Buffer nach einer Nummer die REQUIRED_AGREEMENT-mal vorkommt.
+  // Wählt für den Set-Code die häufigste Variante aus den Lesungen der
+  // bestätigten Nummer.
+  function findConfirmedRead() {
+    var now = Date.now();
+    liveRecentReads = liveRecentReads.filter(function(r) { return now - r.ts < READ_TTL_MS; });
+    var counts = {};
+    liveRecentReads.forEach(function(r) {
+      counts[r.number] = (counts[r.number] || 0) + 1;
+    });
+    for (var num in counts) {
+      if (counts[num] >= REQUIRED_AGREEMENT) {
+        // Häufigsten Set-Code für diese Nummer wählen
+        var setCounts = {};
+        liveRecentReads.forEach(function(r) {
+          if (r.number !== num || !r.setCode) return;
+          setCounts[r.setCode] = (setCounts[r.setCode] || 0) + 1;
+        });
+        var bestSet = null, bestN = 0;
+        for (var sc in setCounts) {
+          if (setCounts[sc] > bestN) { bestN = setCounts[sc]; bestSet = sc; }
+        }
+        return { number: num, setCode: bestSet };
+      }
+    }
+    return null;
+  }
+
+  function updateScanDiag(info, text, level) {
+    var el = document.getElementById("live-scan-diag");
+    if (!el) return;
+    el.textContent = text || "";
+    el.classList.remove("hidden", "ok", "warn", "err");
+    if (level) el.classList.add(level);
+    if (!text) el.classList.add("hidden");
+  }
+
+  function showLiveError(msg) {
+    var el = document.getElementById("live-error-banner");
+    el.textContent = msg;
+    el.classList.remove("hidden");
+  }
+  function hideLiveError() {
+    document.getElementById("live-error-banner").classList.add("hidden");
+  }
+
+  function renderHeaderCount() {
+    var total = cards.reduce(function (sum, c) { return sum + (c.quantity || 1); }, 0);
+    document.getElementById("header-count").textContent = total + " Karten";
+  }
+
+  function gameLabel(key) { return (GAMES[key] && GAMES[key].label) || "Unbekannt"; }
+
+  function renderQueue() {
+    var analyzingCount = queue.filter(function (e) { return e.status === "analyzing"; }).length;
+    var needsSelectionCount = queue.filter(function (e) { return e.status === "needs_selection"; }).length;
+    var readyCount = queue.filter(function (e) { return e.status === "ready" && e.name.trim(); }).length;
+
+    document.getElementById("queue-empty").classList.toggle("hidden", queue.length > 0);
+    document.getElementById("queue-section").classList.toggle("hidden", queue.length === 0);
+    document.getElementById("stat-grid").classList.toggle("hidden", !(cards.length > 0 && queue.length === 0));
+
+    var headerText = queue.length + " " + (queue.length === 1 ? "Karte" : "Karten") + " im Stapel";
+    if (analyzingCount > 0) headerText += " · " + analyzingCount + " wird erkannt";
+    if (needsSelectionCount > 0) headerText += " · " + needsSelectionCount + " braucht Auswahl";
+    document.getElementById("queue-header-text").textContent = headerText;
+
+    var saveBtn = document.getElementById("save-all-btn");
+    saveBtn.classList.toggle("hidden", readyCount === 0);
+    document.getElementById("save-all-count").textContent = readyCount;
+
+    var list = document.getElementById("queue-list");
+    // Alle Einträge anzeigen — neueste oben (queue ist bereits per unshift sortiert)
+    list.innerHTML = queue.map(renderQueueRow).join("");
+
+    queue.forEach(function (entry) {
+      var editBtn = list.querySelector('[data-edit="' + entry.id + '"]');
+      if (editBtn) editBtn.onclick = function () { editingQueueId = editingQueueId === entry.id ? null : entry.id; renderQueue(); };
+      var removeBtn = list.querySelector('[data-remove="' + entry.id + '"]');
+      if (removeBtn) removeBtn.onclick = function () { removeFromQueue(entry.id); };
+      var openKeyBtn = list.querySelector('#open-key-from-error-' + entry.id);
+      if (openKeyBtn) openKeyBtn.onclick = function () { document.getElementById("api-key-overlay").classList.remove("hidden"); };
+
+      if (entry.status === "needs_selection") {
+        entry.candidates.forEach(function (c) {
+          var btn = list.querySelector('[data-candidate="' + entry.id + '_' + c.riftcodexId + '"]');
+          if (btn) btn.onclick = function () { selectCandidate(entry.id, c); };
+        });
+        var noneBtn = list.querySelector('[data-none="' + entry.id + '"]');
+        if (noneBtn) noneBtn.onclick = function () { editingQueueId = entry.id; renderQueue(); };
+      }
+
+      if (editingQueueId === entry.id) {
+        bindQueueEditHandlers(entry, list);
+      }
+    });
+
+    renderStatGrid();
+  }
+
+  function renderStatGrid() {
+    var grid = document.getElementById("stat-grid");
+    if (cards.length === 0 || queue.length > 0) { grid.innerHTML = ""; return; }
+    var counts = {};
+    Object.keys(GAMES).forEach(function (g) {
+      counts[g] = cards.filter(function (c) { return c.game === g; }).reduce(function (s, c) { return s + (c.quantity || 1); }, 0);
+    });
+    grid.innerHTML = Object.keys(GAMES).map(function (key) {
+      var g = GAMES[key];
+      return '<div class="stat-box" style="border-left-color:' + g.color + '">' +
+        '<div class="label">' + escapeHtml(g.short) + '</div>' +
+        '<div class="value font-display">' + (counts[key] || 0) + '</div></div>';
+    }).join("");
+  }
+
+  function renderQueueRow(entry) {
+    var g = GAMES[entry.game] || { label: "Unbekannt", color: "#6B6452" };
+    var borderColor = entry.status === "analyzing" ? "#6B6452" : entry.status === "error" ? "#D4824C" : g.color;
+
+    if (editingQueueId === entry.id) {
+      var gameChips = Object.keys(GAMES).map(function (key) {
+        var gg = GAMES[key];
+        return '<button type="button" class="game-chip focus-ring ' + (entry.game === key ? "active" : "") + '" style="color:' + gg.color + '" data-game="' + key + '">' + escapeHtml(gg.label) + '</button>';
+      }).join("");
+      var langOptions = LANGUAGES.map(function (l) { return '<option value="' + l + '" ' + (entry.language === l ? "selected" : "") + '>' + l + '</option>'; }).join("");
+      var condOptions = CONDITIONS.map(function (c) { return '<option value="' + c + '" ' + (entry.condition === c ? "selected" : "") + '>' + escapeHtml(c) + '</option>'; }).join("");
+
+      return '<div class="edit-box" id="edit-box-' + entry.id + '">' +
+        '<div class="edit-header"><img src="' + escapeHtml(entry.previewUrl) + '" alt="">' +
+        '<div style="flex:1;"><div class="game-chip-row">' + gameChips + '</div>' +
+        '<input type="text" class="input-field focus-ring" id="edit-name-' + entry.id + '" value="' + escapeHtml(entry.name) + '" placeholder="Kartenname"></div></div>' +
+        '<div class="form-row"><div class="form-field"><label>Set</label><input type="text" class="input-field focus-ring" id="edit-set-' + entry.id + '" value="' + escapeHtml(entry.set) + '"></div>' +
+        '<div class="form-field"><label>Nummer</label><input type="text" class="input-field focus-ring" id="edit-number-' + entry.id + '" value="' + escapeHtml(entry.number) + '"></div></div>' +
+        '<div class="form-row"><div class="form-field"><label>Rarity</label><input type="text" class="input-field focus-ring" id="edit-rarity-' + entry.id + '" value="' + escapeHtml(entry.rarity) + '"></div>' +
+        '<div class="form-field"><label>Menge</label><input type="number" min="1" class="input-field focus-ring" id="edit-quantity-' + entry.id + '" value="' + entry.quantity + '"></div></div>' +
+        '<div class="form-row"><div class="form-field"><label>Sprache</label><select class="input-field focus-ring" id="edit-language-' + entry.id + '">' + langOptions + '</select></div>' +
+        '<div class="form-field"><label>Zustand</label><select class="input-field focus-ring" id="edit-condition-' + entry.id + '">' + condOptions + '</select></div></div>' +
+        '<label class="foil-checkbox-row"><input type="checkbox" id="edit-foil-' + entry.id + '" ' + (entry.foil ? "checked" : "") + '><span style="font-size:13px;">Foil</span></label>' +
+        '<button type="button" class="btn-primary focus-ring" style="width:100%;" data-edit="' + entry.id + '">Fertig</button></div>';
+    }
+
+    if (entry.status === "needs_selection") {
+      var numberUncertain = (entry.uncertainFields || []).indexOf("number") !== -1;
+      var foilUncertain = (entry.uncertainFields || []).indexOf("foil") !== -1;
+      var langUncertain = (entry.uncertainFields || []).indexOf("language") !== -1;
+
+      var warningHtml = "";
+      if (numberUncertain) {
+        warningHtml = '<div style="background:#241A14; border:1px solid #4A2E1E; border-radius:8px; padding:8px 10px; margin-bottom:10px; font-size:11px; color:#D4B49A; line-height:1.4;">' +
+          '⚠ Sammlernummer/Variante (z.B. ein Sternchen für seltenere Editionen) war auf dem Foto nicht eindeutig lesbar. Das kann den Wert stark beeinflussen — bitte die Karte direkt mit der Nummer auf dem Original vergleichen, nicht nur den Namen.</div>';
+      }
+      var subtitleExtra = [];
+      if (foilUncertain) subtitleExtra.push("Foil-Glanz unsicher");
+      if (langUncertain) subtitleExtra.push("Sprache unsicher");
+
+      var candidatesHtml = entry.candidates.map(function (c) {
+        var sel = entry.selectedCandidate && entry.selectedCandidate.riftcodexId === c.riftcodexId;
+        var img = c.imageUrl ? '<img src="' + escapeHtml(c.imageUrl) + '" alt="' + escapeHtml(c.name) + '">' : '<div class="placeholder"></div>';
+        var tag = c.isPromo ? "PROMO" : c.isAltArt ? "ALT ART" : escapeHtml(c.set);
+        return '<button type="button" class="candidate-card focus-ring ' + (sel ? "selected" : "") + '" data-candidate="' + entry.id + '_' + c.riftcodexId + '">' +
+          img + '<div class="tag">' + tag + '</div><div class="cname">' + escapeHtml(c.name) + '</div><div class="cnum">' + escapeHtml(c.number) + '</div></button>';
+      }).join("");
+
+      var pctLabel = entry.matchScore ? Math.round(entry.matchScore * 100) + '% Übereinstimmung — ' : '';
+      var subtitle = pctLabel + entry.candidates.length + ' Vorschläge — tippe die richtige an';
+      if (subtitleExtra.length) subtitle += ' (' + subtitleExtra.join(", ") + ')';
+
+      return '<div class="candidate-box"><div class="candidate-header"><img src="' + escapeHtml(entry.previewUrl) + '" alt="">' +
+        '<div><div class="title">Welche Karte ist das?</div><div class="subtitle">' + subtitle + '</div></div></div>' +
+        warningHtml +
+        '<div class="candidate-scroll">' + candidatesHtml + '</div>' +
+        '<button type="button" class="btn-secondary focus-ring" style="width:100%; margin-top:10px; padding:8px 12px; font-size:12px;" data-none="' + entry.id + '">Keine davon — manuell eintragen</button></div>';
+    }
+
+    var bodyHtml;
+    if (entry.status === "analyzing") {
+      bodyHtml = '<div class="analyzing"><span class="spin" style="display:inline-block;">⏳</span> Wird erkannt …</div>';
+    } else if (entry.status === "error") {
+      if (entry.errorMessage === "NO_API_KEY") {
+        bodyHtml = '<span class="error-text">Kein API-Key gesetzt — <button type="button" id="open-key-from-error-' + entry.id + '" style="background:none;border:none;color:#C9A24B;font-size:inherit;cursor:pointer;padding:0;text-decoration:underline;">jetzt eintragen</button></span>';
+      } else {
+        bodyHtml = '<span class="error-text">' + escapeHtml(entry.errorMessage || "Erkennung fehlgeschlagen") + ' — tippe ✎ zum Eintragen</span>';
+      }
+    } else {
+      var metaParts = [gameLabel(entry.game), entry.set, entry.number].filter(Boolean).map(escapeHtml).join(" · ");
+      var uf = entry.uncertainFields || [];
+      bodyHtml = '<div class="name-row"><span class="name">' + (escapeHtml(entry.name) || "Unbenannt — bitte prüfen") + '</span>' +
+        (entry.foil ? '<span class="foil-tag">FOIL</span>' : "") + '</div>' +
+        '<div class="meta">' + (metaParts || "Spiel nicht erkannt") + '</div>' +
+        ((entry.game === "riftbound" && entry.selectedCandidate && entry.selectedCandidate.isPromo) ? '<div style="font-size:11px;color:#C9A24B;margin-top:2px;">Promo-Karte (Set OPP)</div>' : "") +
+        (uf.length > 0 ? '<div style="font-size:11px;color:#D4824C;margin-top:2px;">⚠ Unsicher bei: ' + uf.map(escapeHtml).join(", ") + ' — bitte prüfen</div>' : "");
+    }
+
+    return '<div class="queue-row" style="border-left-color:' + borderColor + '">' +
+      '<img src="' + escapeHtml(entry.cardImageUrl || entry.previewUrl) + '" alt="" style="opacity:' + (entry.status === "analyzing" ? 0.5 : 1) + '">' +
+      '<div class="info">' + bodyHtml + '</div>' +
+      '<button type="button" class="btn-icon focus-ring" data-edit="' + entry.id + '"' + (entry.status === "analyzing" ? ' disabled style="opacity:0.3"' : '') + '>✎</button>' +
+      '<button type="button" class="btn-icon focus-ring" data-remove="' + entry.id + '">🗑</button></div>';
+  }
+
+  function bindQueueEditHandlers(entry, container) {
+    var box = container.querySelector("#edit-box-" + entry.id);
+    if (!box) return;
+
+    box.querySelectorAll("[data-game]").forEach(function (btn) {
+      btn.onclick = function () {
+        var e = queue.filter(function (q) { return q.id === entry.id; })[0];
+        if (e) e.game = btn.getAttribute("data-game");
+        renderQueue();
+      };
+    });
+
+    var doneBtn = box.querySelector('[data-edit="' + entry.id + '"]');
+    if (doneBtn) doneBtn.onclick = function () {
+      var name = box.querySelector("#edit-name-" + entry.id).value;
+      var set = box.querySelector("#edit-set-" + entry.id).value;
+      var number = box.querySelector("#edit-number-" + entry.id).value;
+      var rarity = box.querySelector("#edit-rarity-" + entry.id).value;
+      var quantity = Math.max(1, parseInt(box.querySelector("#edit-quantity-" + entry.id).value, 10) || 1);
+      var language = box.querySelector("#edit-language-" + entry.id).value;
+      var condition = box.querySelector("#edit-condition-" + entry.id).value;
+      var foil = box.querySelector("#edit-foil-" + entry.id).checked;
+      var e = queue.filter(function (q) { return q.id === entry.id; })[0];
+      if (e) {
+        e.name = name; e.set = set; e.number = number; e.rarity = rarity;
+        e.quantity = quantity; e.language = language; e.condition = condition; e.foil = foil;
+        e.status = "ready";
+      }
+      editingQueueId = null;
+      renderQueue();
+    };
+  }
+
+  function renderCollection() {
+    renderFilterChips();
+    var filtered = cards.filter(function (c) {
+      if (filterGame !== "all" && c.game !== filterGame) return false;
+      if (searchTerm.trim()) {
+        var t = searchTerm.toLowerCase();
+        return c.name.toLowerCase().indexOf(t) !== -1 || c.set.toLowerCase().indexOf(t) !== -1 || c.number.toLowerCase().indexOf(t) !== -1;
+      }
+      return true;
+    });
+
+    var content = document.getElementById("collection-content");
+
+    if (filtered.length === 0) {
+      content.innerHTML = '<div class="empty-collection"><p>' +
+        (cards.length === 0 ? "Noch keine Karten erfasst. Scann deine erste Karte." : "Keine Treffer für diesen Filter.") +
+        '</p></div>';
+      return;
+    }
+
+    if (filterGame !== "all") {
+      content.innerHTML = '<div class="queue-list">' + filtered.map(renderCardRow).join("") + '</div>';
+      bindCardRowHandlers(filtered);
+      return;
+    }
+
+    var html = "";
+    Object.keys(GAMES).forEach(function (key) {
+      var g = GAMES[key];
+      var groupCards = filtered.filter(function (c) { return c.game === key; });
+      if (groupCards.length === 0) return;
+      var groupTotal = groupCards.reduce(function (s, c) { return s + (c.quantity || 1); }, 0);
+      html += '<div class="game-group"><div class="game-group-header">' +
+        '<div class="game-group-dot" style="background:' + g.color + '"></div>' +
+        '<h2 class="font-display" style="color:' + g.color + '">' + escapeHtml(g.label) + '</h2>' +
+        '<span class="count">' + groupCards.length + ' ' + (groupCards.length === 1 ? "Karte" : "Karten") + ' · ' + groupTotal + ' Stück</span>' +
+        '<div class="rule"></div></div><div class="queue-list">' + groupCards.map(renderCardRow).join("") + '</div></div>';
+    });
+    var unknownCards = filtered.filter(function (c) { return !GAMES[c.game]; });
+    if (unknownCards.length > 0) {
+      html += '<div class="game-group"><div class="game-group-header">' +
+        '<div class="game-group-dot" style="background:#6B6452"></div>' +
+        '<h2 class="font-display" style="color:#6B6452">Unbekannt</h2>' +
+        '<span class="count">' + unknownCards.length + ' ' + (unknownCards.length === 1 ? "Karte" : "Karten") + '</span>' +
+        '<div class="rule"></div></div><div class="queue-list">' + unknownCards.map(renderCardRow).join("") + '</div></div>';
+    }
+    content.innerHTML = html;
+    bindCardRowHandlers(filtered.concat(unknownCards));
+  }
+
+  function renderCardRow(card) {
+    var g = GAMES[card.game] || { label: "Unbekannt", color: "#6B6452" };
+    if (editingCardId === card.id) {
+      var condOptions = CONDITIONS.map(function (c) { return '<option value="' + c + '" ' + (card.condition === c ? "selected" : "") + '>' + escapeHtml(c) + '</option>'; }).join("");
+      return '<div class="edit-box" id="card-edit-box-' + card.id + '">' +
+        '<div class="form-row"><div class="form-field"><label>Set</label><input type="text" class="input-field focus-ring" id="card-edit-set-' + card.id + '" value="' + escapeHtml(card.set) + '"></div>' +
+        '<div class="form-field"><label>Nummer</label><input type="text" class="input-field focus-ring" id="card-edit-number-' + card.id + '" value="' + escapeHtml(card.number) + '"></div></div>' +
+        '<div class="form-row"><div class="form-field"><label>Menge</label><input type="number" min="1" class="input-field focus-ring" id="card-edit-quantity-' + card.id + '" value="' + card.quantity + '"></div>' +
+        '<div class="form-field"><label>Zustand</label><select class="input-field focus-ring" id="card-edit-condition-' + card.id + '">' + condOptions + '</select></div></div>' +
+        '<label class="foil-checkbox-row"><input type="checkbox" id="card-edit-foil-' + card.id + '" ' + (card.foil ? "checked" : "") + '><span style="font-size:13px;">Foil</span></label>' +
+        '<button type="button" class="btn-primary focus-ring" style="width:100%; margin-top:8px;" data-card-done="' + card.id + '">Fertig</button></div>';
+    }
+    var img = card.previewUrl ? '<img src="' + escapeHtml(card.previewUrl) + '" alt="">' : '<div class="img-placeholder"></div>';
+    var meta = [card.set, card.number, card.rarity, card.language].filter(Boolean).map(escapeHtml).join(" · ");
+    return '<div class="card-row" style="border-left-color:' + g.color + '">' + img +
+      '<div class="info"><div class="name-row"><span class="name">' + (escapeHtml(card.name) || "Unbenannt") + '</span>' +
+      (card.foil ? '<span class="foil-tag">FOIL</span>' : "") + '</div><div class="meta">' + meta + '</div></div>' +
+      '<div class="qty" style="color:' + g.color + '">×' + card.quantity + '</div>' +
+      '<button type="button" class="btn-icon focus-ring" data-card-edit="' + card.id + '">✎</button>' +
+      '<button type="button" class="btn-icon focus-ring" data-card-delete="' + card.id + '">🗑</button></div>';
+  }
+
+  function bindCardRowHandlers(cardList) {
+    cardList.forEach(function (card) {
+      var editBtn = document.querySelector('[data-card-edit="' + card.id + '"]');
+      if (editBtn) editBtn.onclick = function () { editingCardId = editingCardId === card.id ? null : card.id; renderCollection(); };
+      var delBtn = document.querySelector('[data-card-delete="' + card.id + '"]');
+      if (delBtn) delBtn.onclick = function () { deleteCard(card.id); };
+      var doneBtn = document.querySelector('[data-card-done="' + card.id + '"]');
+      if (doneBtn) doneBtn.onclick = function () {
+        var box = document.getElementById("card-edit-box-" + card.id);
+        card.set = box.querySelector("#card-edit-set-" + card.id).value;
+        card.number = box.querySelector("#card-edit-number-" + card.id).value;
+        card.quantity = Math.max(1, parseInt(box.querySelector("#card-edit-quantity-" + card.id).value, 10) || 1);
+        card.condition = box.querySelector("#card-edit-condition-" + card.id).value;
+        card.foil = box.querySelector("#card-edit-foil-" + card.id).checked;
+        editingCardId = null;
+        saveCards();
+        renderCollection();
+      };
+    });
+  }
+
+  function renderFilterChips() {
+    var container = document.getElementById("filter-chips");
+    var chips = [{ key: "all", label: "Alle", color: "#C9A24B" }].concat(
+      Object.keys(GAMES).map(function (key) { return { key: key, label: GAMES[key].label, color: GAMES[key].color }; })
+    );
+    container.innerHTML = chips.map(function (c) {
+      var active = filterGame === c.key;
+      return '<button type="button" class="filter-chip focus-ring ' + (active ? "active" : "") + '" style="color:' + (active ? c.color : "#8A8270") + '; border-color:' + (active ? c.color : "#262219") + '" data-filter="' + c.key + '">' + escapeHtml(c.label) + '</button>';
+    }).join("");
+    container.querySelectorAll("[data-filter]").forEach(function (btn) {
+      btn.onclick = function () { filterGame = btn.getAttribute("data-filter"); renderCollection(); };
+    });
+  }
+
+  function switchView(newView) {
+    view = newView;
+    document.getElementById("view-scan").classList.toggle("hidden", view !== "scan");
+    document.getElementById("view-collection").classList.toggle("hidden", view !== "collection");
+    document.getElementById("tab-scan").classList.toggle("active", view === "scan");
+    document.getElementById("tab-collection").classList.toggle("active", view === "collection");
+    if (view === "collection") renderCollection();
+  }
+
+  function init() {
+    loadState();
+    renderHeaderCount();
+    renderQueue();
+
+    document.getElementById("tab-scan").onclick = function () { switchView("scan"); };
+    document.getElementById("tab-collection").onclick = function () { switchView("collection"); };
+
+    document.querySelectorAll("#foil-mode-row [data-mode]").forEach(function (btn) {
+      btn.onclick = function () {
+        foilMode = btn.getAttribute("data-mode");
+        saveFoilMode();
+        document.querySelectorAll("#foil-mode-row [data-mode]").forEach(function (b) { b.classList.toggle("active", b === btn); });
+      };
+    });
+
+    // Special-Case-Filter (Overnumber/Alt Art/Promo): unabhängige An/Aus-Schalter,
+    // bleiben aktiv bis der Nutzer sie selbst wieder ausschaltet.
+    document.querySelectorAll("#special-filter-row [data-filter]").forEach(function (btn) {
+      var key = btn.getAttribute("data-filter");
+      btn.classList.toggle("active", !!specialFilters[key]);
+      btn.onclick = function () {
+        specialFilters[key] = !specialFilters[key];
+        btn.classList.toggle("active", specialFilters[key]);
+        saveSpecialFilters();
+      };
+    });
+
+    document.getElementById("settings-btn").onclick = function () {
+      document.getElementById("api-key-overlay").classList.remove("hidden");
+    };
+
+    // Riftcodex-Kartenliste im Hintergrund laden
+    loadRiftcodexCache();
+    // OCR-Engine vorwärmen (verhindert Verzögerung beim ersten Scan)
+    var ocrStatus = document.getElementById("ocr-engine-status");
+    if (typeof TextDetector !== "undefined") {
+      if (ocrStatus) { ocrStatus.textContent = "Nativer TextDetector verfügbar ✓"; ocrStatus.style.color = "#6FCF8F"; }
+    } else if (typeof Tesseract !== "undefined") {
+      if (ocrStatus) { ocrStatus.textContent = "Tesseract lädt …"; ocrStatus.style.color = "#C9A24B"; }
+      getOCRWorker().then(function() {
+        if (ocrStatus) { ocrStatus.textContent = "Tesseract bereit ✓"; ocrStatus.style.color = "#6FCF8F"; }
+      }).catch(function() {
+        if (ocrStatus) { ocrStatus.textContent = "Tesseract konnte nicht geladen werden"; ocrStatus.style.color = "#E07070"; }
+      });
+    }
+
+    document.getElementById("live-scan-start-btn").onclick = startLiveScan;
+    document.getElementById("live-scan-stop-btn").onclick = stopLiveScan;
+    document.getElementById("live-torch-btn").onclick = cycleTorch;
+
+    function handleFiles(fileList) {
+      Array.prototype.slice.call(fileList || []).forEach(function (f) { addToQueue(f); });
+    }
+    document.getElementById("camera-input").onchange = function (e) { handleFiles(e.target.files); e.target.value = ""; };
+    document.getElementById("gallery-input").onchange = function (e) { handleFiles(e.target.files); e.target.value = ""; };
+    document.getElementById("gallery-input-visible").onchange = function (e) { handleFiles(e.target.files); e.target.value = ""; };
+    document.getElementById("camera-capture-btn").onclick = function () { document.getElementById("camera-input").click(); };
+    document.getElementById("gallery-btn").onclick = function () { document.getElementById("gallery-input").click(); };
+    document.getElementById("camera-capture-btn-prominent").onclick = function () { document.getElementById("camera-input").click(); };
+    document.getElementById("gallery-btn-prominent").onclick = function () { document.getElementById("gallery-input").click(); };
+
+    document.getElementById("save-all-btn").onclick = saveAllReady;
+    document.getElementById("search-input").oninput = function (e) { searchTerm = e.target.value; renderCollection(); };
+
+    var overlay = document.getElementById("api-key-overlay");
+    if (apiKey) overlay.classList.add("hidden");
+    document.getElementById("api-key-save").onclick = function () {
+      var val = document.getElementById("api-key-input").value.trim();
+      if (!val) return;
+      apiKey = val;
+      try { localStorage.setItem(STORAGE_KEY_APIKEY, apiKey); } catch (e) {}
+      overlay.classList.add("hidden");
+    };
+
+    window.addEventListener("beforeunload", function () {
+      if (liveStream) liveStream.getTracks().forEach(function (t) { t.stop(); });
+    });
+  }
+
+  document.addEventListener("DOMContentLoaded", init);
+})();
+</script>
+</body>
+</html>
