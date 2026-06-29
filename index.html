@@ -686,53 +686,68 @@
     return s;
   }
 
-  // Findet beste Karten für ein Query-Embedding.
+  // Findet beste Karten für ein Query-Embedding mit Hubness-Penalty.
   //
-  // Wichtige Fixes gegen "immer dieselbe Karte gewinnt":
-  //   1) candidates werden nach Similarity DESC sortiert (nicht Insertion-
-  //      Order!). Damit ist candidates[0] wirklich die ähnlichste Karte.
-  //   2) Margin-Check: ein klarer Treffer braucht nicht nur hohe Similarity,
-  //      sondern auch deutlich höhere als der 2. Platz (sonst ist's geraten).
-  //   3) Tie-Band nur für IDENTISCHE Embeddings (Riftcodex hat Duplikate —
-  //      Teemo 4×) — sehr eng (0.0005), kein zufälliges Zusammenkleben.
+  // Ranking basiert auf ADJUSTED Similarity:
+  //   adjSim[i] = rawSim[i] - HUB_ALPHA * (hubCount[i] / maxHubCount)
+  //
+  // Damit verlieren Magnet-Karten (Vault Breaker, etc.) ihren strukturellen
+  // Vorteil — sie müssen jetzt DEUTLICH besser matchen als ein nicht-magnetischer
+  // Konkurrent um zu gewinnen. Echte Treffer (z.B. Blood Rush ohne Hub-Status)
+  // behalten ihre volle Similarity.
   function findBestEmbeddingMatch(queryEmb) {
     if (!embedDb || !embedDb.cardIds.length) return null;
     var dim = EMBED_DIM;
     var all = embedDb.embeddings;
     var N = embedDb.cardIds.length;
-    var sims = new Float32Array(N);
-    var bestSim = -Infinity, secondBestSim = -Infinity, bestIdx = -1;
+    var hubCount = embedDb._hubCount;
+    var maxHub = embedDb._maxHubCount || 1;
+    var sims = new Float32Array(N);     // raw cosine
+    var adjSims = new Float32Array(N);  // mit Hubness-Penalty
+    var bestAdj = -Infinity, secondBestAdj = -Infinity, bestIdx = -1;
     for (var i = 0; i < N; i++) {
       var s = 0, off = i * dim;
       for (var j = 0; j < dim; j++) s += queryEmb[j] * all[off + j];
       sims[i] = s;
-      if (s > bestSim) { secondBestSim = bestSim; bestSim = s; bestIdx = i; }
-      else if (s > secondBestSim) { secondBestSim = s; }
+      // Penalty: Hub-Karten kriegen bis zu HUB_ALPHA Similarity abgezogen.
+      // Normale Karten (hubCount ≈ K=5 oder weniger) praktisch keine Penalty.
+      var penalty = hubCount ? HUB_ALPHA * (hubCount[i] / maxHub) : 0;
+      var adj = s - penalty;
+      adjSims[i] = adj;
+      if (adj > bestAdj) { secondBestAdj = bestAdj; bestAdj = adj; bestIdx = i; }
+      else if (adj > secondBestAdj) { secondBestAdj = adj; }
     }
     if (bestIdx < 0) return null;
 
-    // Tie-Band sehr eng — fängt nur echte Duplikate (identische Embeddings),
-    // nicht zufällig ähnliche Karten
+    var bestRawSim = sims[bestIdx];
+    var hubOfBest = hubCount ? hubCount[bestIdx] : 0;
+
+    // Tie-Band sehr eng auf ADJUSTED Sim — fängt nur echte Duplikate
     var tieBand = 0.0005;
     var tiePool = [];
     for (var k = 0; k < N; k++) {
-      if (sims[k] >= bestSim - tieBand) {
+      if (adjSims[k] >= bestAdj - tieBand) {
         var cardId = embedDb.cardIds[k];
         var card = (riftcodexCache || []).filter(function(c) { return c.riftcodexId === cardId; })[0];
-        if (card) tiePool.push({ card: card, similarity: sims[k] });
+        if (card) tiePool.push({
+          card: card,
+          similarity: sims[k],           // raw, für Diagnose
+          adjustedSimilarity: adjSims[k] // mit Penalty
+        });
       }
     }
-    // Sortiere abfallend nach Similarity → candidates[0] ist wirklich die beste
-    tiePool.sort(function(a, b) { return b.similarity - a.similarity; });
+    tiePool.sort(function(a, b) { return b.adjustedSimilarity - a.adjustedSimilarity; });
 
-    var margin = bestSim - secondBestSim; // Wie viel besser als der 2. Platz?
+    var margin = bestAdj - secondBestAdj; // auf ADJUSTED Sim
     return {
       candidates: tiePool,
-      bestSimilarity: bestSim,
-      secondBestSimilarity: secondBestSim,
+      bestSimilarity: bestAdj,            // adjusted → wird für Threshold genutzt
+      rawBestSimilarity: bestRawSim,      // diagnostisch
+      secondBestSimilarity: secondBestAdj,
       margin: margin,
+      hubCountOfBest: hubOfBest,
       card: tiePool[0].card,
-      similarity: bestSim
+      similarity: bestAdj
     };
   }
 
@@ -932,6 +947,69 @@
     return db;
   }
 
+  // Hubness-Reduktion gegen "Magnet-Karten" (Unleashed Vaultbreaker etc.).
+  //
+  // In hochdimensionalen Embedding-Räumen entstehen "Hubs" — Punkte die als
+  // nächster Nachbar von überproportional vielen anderen Punkten auftauchen.
+  // Diese Magnetkarten ziehen JEDEN Query an sich, auch wenn sie nicht
+  // wirklich passen. Bekanntes Phänomen, Literatur: Radovanović et al. 2010.
+  //
+  // Wir berechnen für jede Karte hubCount[i] = wie oft Karte i in den Top-K
+  // nächsten Nachbarn ALLER anderen Karten erscheint. Bei Query-Zeit wird
+  // dann eine Penalty proportional zu hubCount auf die Similarity gerechnet:
+  //   adjustedSim = sim - alpha * (hubCount / maxHubCount)
+  // → Hub-Karten brauchen DEUTLICH höhere Similarity um zu gewinnen,
+  //   normale Karten praktisch keine Penalty.
+  function computeHubness(db, topK) {
+    if (db._hubCount) return; // schon berechnet
+    topK = topK || 5;
+    var n = db.cardIds.length;
+    var dim = db.dim;
+    var emb = db.embeddings;
+    var hubCount = new Int32Array(n);
+    var t0 = performance.now();
+
+    // Für jede Karte i: berechne Similarities zu allen anderen, finde Top-K,
+    // increment hubCount für jede dieser Top-K-Karten
+    var sims = new Float32Array(n);
+    var topIdx = new Int32Array(topK);
+    var topSim = new Float32Array(topK);
+    for (var i = 0; i < n; i++) {
+      var iOff = i * dim;
+      // Similarities (excluding self)
+      for (var j = 0; j < n; j++) {
+        if (j === i) { sims[j] = -Infinity; continue; }
+        var s = 0;
+        var jOff = j * dim;
+        for (var d = 0; d < dim; d++) s += emb[iOff + d] * emb[jOff + d];
+        sims[j] = s;
+      }
+      // Top-K — Insertion-Sort in kleines Array (K=5 → trivial)
+      for (var k = 0; k < topK; k++) { topIdx[k] = -1; topSim[k] = -Infinity; }
+      for (var q = 0; q < n; q++) {
+        var sq = sims[q];
+        if (sq <= topSim[topK - 1]) continue;
+        // einfügen
+        var p = topK - 1;
+        while (p > 0 && topSim[p - 1] < sq) {
+          topSim[p] = topSim[p - 1]; topIdx[p] = topIdx[p - 1]; p--;
+        }
+        topSim[p] = sq; topIdx[p] = q;
+      }
+      for (var k = 0; k < topK; k++) if (topIdx[k] >= 0) hubCount[topIdx[k]]++;
+    }
+
+    // Maximum für Normalisierung finden
+    var maxHub = 0;
+    for (var i = 0; i < n; i++) if (hubCount[i] > maxHub) maxHub = hubCount[i];
+
+    db._hubCount = hubCount;
+    db._maxHubCount = maxHub;
+    var dt = Math.round(performance.now() - t0);
+    console.log("[Hubness] berechnet in " + dt + "ms — max hubCount=" + maxHub +
+                " (Karten erwartet K=" + topK + ", Mittelwert=" + topK + ")");
+  }
+
   // Embedding-DB aus statischer JSON-Datei laden (im Repo mitgeliefert).
   // Format: { dim, cardIds: [...], embeddings: [[f32, ...], ...] }
   // Wir konvertieren die Arrays in eine flache Float32Array für schnellen Vergleich.
@@ -956,7 +1034,8 @@
         }
         var db = { embeddings: flat, cardIds: parsed.cardIds, dim: dim };
         centerEmbeddingDb(db); // Centroid-Effekt eliminieren
-        console.log("[Embeddings] Prebuilt geladen + zentriert:", n, "Karten");
+        computeHubness(db, 5); // Hub-Karten identifizieren für Penalty
+        console.log("[Embeddings] Prebuilt geladen + zentriert + hubness:", n, "Karten");
         return db;
       })
       .catch(function(err) {
@@ -2081,14 +2160,18 @@
   //   ≥ 0.78 → sehr ähnlich, fast sicher dieselbe Karte → sofort bestätigen
   //   ≥ 0.65 → ähnlich, wahrscheinlich dieselbe → 2-Frame-Konsens
   //   <  0.65 → nicht klar → OCR-Fallback
-  // Schwellen für ZENTRIERTEN Embedding-Raum (Mean-subtrahiert).
-  // Werte sind hier deutlich niedriger als bei L2-only Cosine-Similarity:
-  // typisch ~0.4-0.6 für richtigen Match, ~0.0-0.2 für falsche.
-  // Plus zusätzlich Margin-Check (best - 2ndBest) gegen False Positives.
-  var EMB_MATCH_STRONG = 0.35;
-  var EMB_MATCH_MEDIUM = 0.20;
-  var EMB_MIN_MARGIN_STRONG = 0.08;  // ein klarer Treffer muss deutlich besser sein als der 2.
-  var EMB_MIN_MARGIN_MEDIUM = 0.04;  // bei medium: zumindest etwas Abstand
+  // Schwellen für ZENTRIERTEN + HUBNESS-ADJUSTED Embedding-Raum.
+  // Beobachtung Blood Rush: rawSim 0.34, Margin 0.045-0.090 → korrekt erkannt.
+  // Beobachtung Vault Breaker: Hub-Karte, gewann oft mit ähnlichen Werten.
+  // Mit Hubness-Penalty bekommt Vault Breaker ~HUB_ALPHA Abzug, andere
+  // (z.B. Blood Rush) nur einen Bruchteil → Margins werden klarer.
+  var EMB_MATCH_STRONG = 0.30;        // adj-sim: leicht runter wegen Penalty
+  var EMB_MATCH_MEDIUM = 0.18;
+  var EMB_MIN_MARGIN_STRONG = 0.04;   // Blood Rush margin 0.045 passt
+  var EMB_MIN_MARGIN_MEDIUM = 0.025;
+  // Anti-Hub-Multiplikator: max Penalty die eine Magnet-Karte abkriegt.
+  // 0.15 = Vault Breaker (höchste hub-count) verliert 0.15 vs nicht-magnetischen Konkurrent.
+  var HUB_ALPHA = 0.15;
 
   // Konsens-Buffer für Embedding-Matches (analog zum OCR-Buffer)
   var liveRecentImgMatches = [];
@@ -2167,12 +2250,14 @@
           if (match && match.candidates && match.candidates.length > 0) {
             var top = match.candidates.slice(0, 3).map(function(c) {
               return (c.card.set || "?") + " " + (c.card.name || c.card.number || "?") +
-                     " (" + c.similarity.toFixed(3) + ")";
+                     " (raw " + c.similarity.toFixed(3) + " adj " + (c.adjustedSimilarity || c.similarity).toFixed(3) + ")";
             }).join("\n  ");
-            console.log("[Embed-Match] Crop:", match.cropUsed,
-                        "Beste:", match.bestSimilarity.toFixed(3),
-                        "Margin:", (match.margin || 0).toFixed(3),
-                        "Top-3:\n  " + top);
+            console.log("[Embed-Match] Crop=" + match.cropUsed,
+                        "adjSim=" + match.bestSimilarity.toFixed(3),
+                        "rawSim=" + (match.rawBestSimilarity || 0).toFixed(3),
+                        "margin=" + (match.margin || 0).toFixed(3),
+                        "hubCount(best)=" + (match.hubCountOfBest || 0),
+                        "\nTop-3:\n  " + top);
           }
           // Ein klarer Treffer braucht ZWEI Bedingungen: hohe Similarity
           // UND deutlicher Abstand zum 2. Platz. Sonst war's geraten.
@@ -2187,11 +2272,14 @@
           // Kein konfidenter Match → OCR als Fallback
           if (match) {
             var topText = match.candidates.slice(0, 3).map(function(c) {
-              return "  " + (c.card.name || c.card.number || "?") + " (" + c.similarity.toFixed(3) + ")";
+              return "  " + (c.card.name || c.card.number || "?") +
+                     " (raw " + c.similarity.toFixed(3) + " adj " + (c.adjustedSimilarity || c.similarity).toFixed(3) + ")";
             }).join("\n");
             updateScanDiag(null,
-              "Kein klarer Bild-Match. Best: " + sim.toFixed(3) +
+              "Kein klarer Bild-Match. adjSim: " + sim.toFixed(3) +
+              " (raw " + (match.rawBestSimilarity || 0).toFixed(3) + ")" +
               " | Margin: " + margin.toFixed(3) +
+              " | Hub(best): " + (match.hubCountOfBest || 0) +
               " | Crop: " + match.cropUsed + "\nTop-3:\n" + topText +
               "\nOCR-Fallback läuft …",
               "warn");
