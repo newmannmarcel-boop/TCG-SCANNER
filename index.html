@@ -410,6 +410,12 @@
   var liveTorchTrack = null;
   var liveTorchOn = false;
   var liveTorchMode = "off"; // "off" | "scan" | "on"
+  // Buffer der letzten OCR-Lesungen für Konsens-Validierung
+  // (verhindert falsche Bestätigungen bei OCR-Wackeln zwischen Frames)
+  var liveRecentReads = [];
+  var REQUIRED_AGREEMENT = 2; // gleiche Nummer in N aufeinanderfolgenden Reads → akzeptiert
+  var READ_BUFFER_MAX = 4;
+  var READ_TTL_MS = 6000;
 
   var riftcodexCache = null;
   var riftcodexCachePromise = null;
@@ -1284,6 +1290,7 @@
     if (liveStream) { liveStream.getTracks().forEach(function (t) { t.stop(); }); liveStream = null; }
     liveActive = false;
     liveTorchTrack = null; liveTorchOn = false; liveTorchMode = "off";
+    liveRecentReads = [];
     var tb = document.getElementById("live-torch-btn");
     if (tb) { tb.classList.add("hidden"); tb.classList.remove("on"); tb.textContent = "Blitz aus"; }
     var diag = document.getElementById("live-scan-diag");
@@ -1432,23 +1439,42 @@
         liveBusy = false;
         return;
       }
-      var label = info.setCode ? info.setCode + " " + info.number : info.number;
-      setLiveStatusPill("Erkannt: " + label, true);
+
+      // Lesung in den Konsens-Buffer aufnehmen
+      rememberRead(info);
+      var confirmed = findConfirmedRead();
+
+      if (!confirmed) {
+        // Erst eine einzelne Lesung — auf Bestätigung warten
+        var label = info.setCode ? info.setCode + " " + info.number : info.number;
+        var count = countReads(info.number);
+        setLiveStatusPill(label + " (" + count + "× — warte auf " + REQUIRED_AGREEMENT + "×)", true);
+        updateScanDiag(info,
+          "Lese: " + label + "  (Bestätigung " + count + "/" + REQUIRED_AGREEMENT + ")\n" +
+          "Mehrere Frames müssen die selbe Nummer liefern bevor übernommen wird",
+          "warn");
+        liveBusy = false;
+        return;
+      }
+
+      // Bestätigt durch mehrfache übereinstimmende Lesung → übernehmen
+      liveRecentReads = []; // Buffer leeren für nächste Karte
+      var confirmedLabel = confirmed.setCode ? confirmed.setCode + " " + confirmed.number : confirmed.number;
+      setLiveStatusPill("Bestätigt: " + confirmedLabel, true);
+
       canvas.toBlob(function(blob) {
         if (!blob) { liveBusy = false; return; }
         var file = new File([blob], "live-" + Date.now() + ".jpg", { type: "image/jpeg" });
-        addToQueue(file, { number: info.number, setCode: info.setCode });
-        // Diagnose aus der Suche (window._lastSearchDiag) im UI anzeigen.
-        // Mit kleinem Delay, damit search erst gelaufen ist.
+        addToQueue(file, { number: confirmed.number, setCode: confirmed.setCode });
         setTimeout(function() {
           var diag = window._lastSearchDiag;
-          if (!diag) { updateScanDiag(info, "Suche läuft …", null); return; }
+          if (!diag) { updateScanDiag(confirmed, "Suche läuft …", null); return; }
           var ok = diag.matchedSet && diag.candidateCount === 1;
-          var line = "OCR: " + (info.setCode || "—") + " " + info.number +
+          var line = "Bestätigt: " + (confirmed.setCode || "—") + " " + confirmed.number +
                      " → " + (diag.matchedSet || "kein Match") +
                      (diag.candidateCount ? "  (" + diag.candidateCount + " Treffer)" : "");
           var detail = diag.reason || "";
-          updateScanDiag(info, line + (detail ? "\n" + detail : ""), ok ? "ok" : "warn");
+          updateScanDiag(confirmed, line + (detail ? "\n" + detail : ""), ok ? "ok" : "warn");
         }, 200);
       }, "image/jpeg", 0.92);
     }).catch(function() {
@@ -1456,6 +1482,50 @@
       updateScanDiag(null, "OCR-Fehler", "err");
       liveBusy = false;
     });
+  }
+
+  function rememberRead(info) {
+    liveRecentReads.unshift({
+      number: info.number,
+      setCode: info.setCode || null,
+      ts: Date.now()
+    });
+    if (liveRecentReads.length > READ_BUFFER_MAX) liveRecentReads.length = READ_BUFFER_MAX;
+  }
+
+  function countReads(number) {
+    var now = Date.now();
+    return liveRecentReads.filter(function(r) {
+      return r.number === number && now - r.ts < READ_TTL_MS;
+    }).length;
+  }
+
+  // Sucht im Buffer nach einer Nummer die REQUIRED_AGREEMENT-mal vorkommt.
+  // Wählt für den Set-Code die häufigste Variante aus den Lesungen der
+  // bestätigten Nummer.
+  function findConfirmedRead() {
+    var now = Date.now();
+    liveRecentReads = liveRecentReads.filter(function(r) { return now - r.ts < READ_TTL_MS; });
+    var counts = {};
+    liveRecentReads.forEach(function(r) {
+      counts[r.number] = (counts[r.number] || 0) + 1;
+    });
+    for (var num in counts) {
+      if (counts[num] >= REQUIRED_AGREEMENT) {
+        // Häufigsten Set-Code für diese Nummer wählen
+        var setCounts = {};
+        liveRecentReads.forEach(function(r) {
+          if (r.number !== num || !r.setCode) return;
+          setCounts[r.setCode] = (setCounts[r.setCode] || 0) + 1;
+        });
+        var bestSet = null, bestN = 0;
+        for (var sc in setCounts) {
+          if (setCounts[sc] > bestN) { bestN = setCounts[sc]; bestSet = sc; }
+        }
+        return { number: num, setCode: bestSet };
+      }
+    }
+    return null;
   }
 
   function updateScanDiag(info, text, level) {
