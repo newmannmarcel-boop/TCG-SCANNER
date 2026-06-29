@@ -577,15 +577,35 @@
     });
   }
 
-  // Crop des Live-Frames auf den Guide-Box-Bereich (= die Karte)
-  function cropGuideBoxArea(canvas) {
+  // Crop des Live-Frames mit konfigurierbaren Insets (in Prozent vom Frame).
+  // Default = Guide-Box-Bereich. Bei niedriger Match-Confidence probieren
+  // wir mehrere Crop-Größen durch (Karte kann verschoben/kleiner sein als Guide).
+  function cropCanvasRegion(canvas, leftPct, topPct, rightPct, bottomPct) {
     var W = canvas.width, H = canvas.height;
-    var x = Math.floor(W * 0.14), y = Math.floor(H * 0.12);
-    var w = Math.floor(W * 0.72), h = Math.floor(H * 0.76);
+    var x = Math.floor(W * leftPct), y = Math.floor(H * topPct);
+    var w = Math.floor(W * (1 - leftPct - rightPct));
+    var h = Math.floor(H * (1 - topPct - bottomPct));
     var out = document.createElement("canvas");
     out.width = w; out.height = h;
     out.getContext("2d").drawImage(canvas, x, y, w, h, 0, 0, w, h);
     return out;
+  }
+
+  function cropGuideBoxArea(canvas) {
+    return cropCanvasRegion(canvas, 0.14, 0.12, 0.14, 0.12);
+  }
+
+  // Mehrere Crop-Varianten — fängt schiefe/verschobene Karten ab.
+  // Reihenfolge nach Wahrscheinlichkeit (häufigster Fall zuerst).
+  function multiCropVariants(canvas) {
+    return [
+      { label: "guide", crop: cropCanvasRegion(canvas, 0.14, 0.12, 0.14, 0.12) },      // genau Guide-Box
+      { label: "tight", crop: cropCanvasRegion(canvas, 0.18, 0.16, 0.18, 0.16) },      // 5% enger
+      { label: "loose", crop: cropCanvasRegion(canvas, 0.10, 0.08, 0.10, 0.08) },      // 5% weiter
+      { label: "center", crop: cropCanvasRegion(canvas, 0.22, 0.20, 0.22, 0.20) },     // nur Karten-Mitte
+      { label: "shift-l", crop: cropCanvasRegion(canvas, 0.10, 0.12, 0.18, 0.12) },    // links verschoben
+      { label: "shift-r", crop: cropCanvasRegion(canvas, 0.18, 0.12, 0.10, 0.12) },    // rechts verschoben
+    ];
   }
 
   // Embedding-DB aus statischer JSON-Datei laden (im Repo mitgeliefert).
@@ -1744,37 +1764,60 @@
   // Konsens-Buffer für Embedding-Matches (analog zum OCR-Buffer)
   var liveRecentImgMatches = [];
 
+  // Adaptive Multi-Crop-Suche: probiert mehrere Crop-Varianten und nimmt die
+  // mit der höchsten Match-Confidence. Stop-Early wenn ein Crop schon einen
+  // sehr klaren Treffer liefert (>= STRONG-Schwelle).
+  function findBestMatchAcrossCrops(canvas) {
+    var variants = multiCropVariants(canvas);
+    var bestMatch = null;
+    var bestLabel = null;
+    return variants.reduce(function(prev, v) {
+      return prev.then(function() {
+        // Wenn schon ein klarer Treffer da → keine weiteren Crops
+        if (bestMatch && bestMatch.bestSimilarity >= EMB_MATCH_STRONG) return;
+        return extractEmbedding(v.crop).then(function(emb) {
+          var m = findBestEmbeddingMatch(emb);
+          if (m && (!bestMatch || m.bestSimilarity > bestMatch.bestSimilarity)) {
+            bestMatch = m;
+            bestLabel = v.label;
+          }
+        }).catch(function() { /* Crop überspringen bei Fehler */ });
+      });
+    }, Promise.resolve()).then(function() {
+      if (bestMatch) bestMatch.cropUsed = bestLabel;
+      return bestMatch;
+    });
+  }
+
   // Top-Level Scan: erst Embedding-Match probieren, dann OCR-Fallback
   function runScanOnCanvas() {
     var canvas = document.getElementById("live-canvas");
     // Wenn Modell + DB bereit → Embedding-Match versuchen
     if (embedModel && embedDb && embedDb.cardIds.length > 0) {
       try {
-        var cardCrop = cropGuideBoxArea(canvas);
-        return extractEmbedding(cardCrop).then(function(queryEmb) {
-          var match = findBestEmbeddingMatch(queryEmb);
+        return findBestMatchAcrossCrops(canvas).then(function(match) {
           // Diagnose: zeige IMMER die Top-3 ähnlichsten Karten + beste Similarity
-          // damit User Daten zum Justieren liefern kann
           if (match && match.candidates && match.candidates.length > 0) {
             var top = match.candidates.slice(0, 3).map(function(c) {
               return (c.card.set || "?") + " " + (c.card.name || c.card.number || "?") +
                      " (" + c.similarity.toFixed(2) + ")";
             }).join("\n  ");
-            console.log("[Embed-Match] Beste:", match.bestSimilarity.toFixed(3),
+            console.log("[Embed-Match] Crop:", match.cropUsed,
+                        "Beste:", match.bestSimilarity.toFixed(3),
                         "Kandidaten:", match.candidates.length,
                         "Top-3:\n  " + top);
           }
           if (match && match.card && match.similarity >= EMB_MATCH_MEDIUM) {
             return handleEmbeddingMatch(canvas, match);
           }
-          // schwacher Match → OCR als Fallback. Zeige trotzdem was die
-          // Bilderkennung gefunden hätte (auch wenn unsicher)
+          // schwacher Match → OCR als Fallback. Zeige Top-3 zum Debuggen
           if (match) {
             var topText = match.candidates.slice(0, 3).map(function(c) {
               return "  " + (c.card.name || c.card.number || "?") + " (" + c.similarity.toFixed(2) + ")";
             }).join("\n");
             updateScanDiag(null,
-              "Kein klarer Bild-Match. Beste Similarity: " + match.similarity.toFixed(2) + " — Top-3:\n" + topText +
+              "Kein klarer Bild-Match. Beste Similarity: " + match.similarity.toFixed(2) +
+              " (Crop " + match.cropUsed + ") — Top-3:\n" + topText +
               "\nOCR-Fallback läuft …",
               "warn");
           }
