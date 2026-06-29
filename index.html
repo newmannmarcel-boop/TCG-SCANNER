@@ -192,6 +192,19 @@
   .live-scan-diag.warn { border-color: #4A3A1A; color: #D4B49A; }
   .live-scan-diag.err  { border-color: #4A2E1E; color: #D4A49A; }
   .live-scan-diag.hidden { display: none; }
+  .embed-debug-panel {
+    margin: 6px 0 8px; padding: 8px 10px; border-radius: 8px;
+    background: #14130E; border: 1px solid #3A2E1E;
+    font-family: ui-monospace, Menlo, Consolas, monospace; color: #C9A24B;
+  }
+  .embed-debug-panel.hidden { display: none; }
+  .edp-title { font-size: 10px; font-weight: 700; letter-spacing: 0.4px; margin-bottom: 6px; }
+  .edp-row { display: flex; gap: 10px; align-items: flex-start; }
+  .edp-row canvas { background: #000; border: 1px solid #C9A24B; image-rendering: pixelated; }
+  .edp-stats { font-size: 10px; line-height: 1.4; color: #A89F8A; white-space: pre-line; flex: 1; word-break: break-all; }
+  .edp-stats .ok   { color: #6FCF8F; }
+  .edp-stats .warn { color: #D4B49A; }
+  .edp-stats .err  { color: #E07070; }
   .embed-build-banner {
     background: #1A1710; border: 1px solid #3A2E1E; border-radius: 12px;
     padding: 14px 16px; margin-bottom: 18px;
@@ -341,6 +354,13 @@
       <div class="live-focus-hint" id="live-focus-hint">Fokus</div>
     </div>
     <div id="live-scan-diag" class="live-scan-diag hidden"></div>
+    <div id="embed-debug-panel" class="embed-debug-panel">
+      <div class="edp-title">DEBUG: was MobileNet sieht</div>
+      <div class="edp-row">
+        <canvas id="edp-canvas" width="80" height="112"></canvas>
+        <div class="edp-stats" id="edp-stats">noch kein Scan</div>
+      </div>
+    </div>
     <button type="button" id="live-scan-stop-btn" class="btn-secondary focus-ring" style="width: 100%;">✕ Live-Scan beenden</button>
   </div>
   <canvas id="live-canvas" class="hidden"></canvas>
@@ -599,6 +619,118 @@
       img.src = url;
     });
   }
+
+  // Visueller Debug-Output: zeigt exakt das Bild das MobileNet als Input
+  // bekommt, plus Pixel-Statistiken. Wenn das Bild leer/schwarz/eintönig ist,
+  // erkennen wir das Problem sofort visuell statt aus Similarity-Zahlen.
+  function debugShowEmbedInput(sourceCanvas, label, embedding) {
+    var dbg = document.getElementById("edp-canvas");
+    var stats = document.getElementById("edp-stats");
+    if (!dbg || !stats) return;
+
+    // Zeichne den Crop ins Debug-Canvas (passt sich an Karten-Aspect an)
+    var aspect = sourceCanvas.width / sourceCanvas.height;
+    dbg.width = 80;
+    dbg.height = Math.max(20, Math.round(80 / aspect));
+    var dctx = dbg.getContext("2d");
+    dctx.clearRect(0, 0, dbg.width, dbg.height);
+    dctx.drawImage(sourceCanvas, 0, 0, dbg.width, dbg.height);
+
+    // Pixel-Statistik direkt vom Quell-Canvas (nicht vom skalierten Debug)
+    var imgData;
+    try {
+      imgData = sourceCanvas.getContext("2d").getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
+    } catch (e) {
+      stats.innerHTML = '<span class="err">FEHLER: getImageData blockiert (' + e.message + ')</span>';
+      return;
+    }
+    var d = imgData.data;
+    var rSum = 0, gSum = 0, bSum = 0, n = 0;
+    var rMin = 255, rMax = 0;
+    for (var i = 0; i < d.length; i += 16) { // jede 4. Pixel reicht
+      rSum += d[i]; gSum += d[i+1]; bSum += d[i+2];
+      if (d[i] < rMin) rMin = d[i]; if (d[i] > rMax) rMax = d[i];
+      n++;
+    }
+    var rAvg = Math.round(rSum / n), gAvg = Math.round(gSum / n), bAvg = Math.round(bSum / n);
+    var variance = rMax - rMin;
+
+    // Embedding-Diagnose: erste 4 Werte + L2-Norm prüfen
+    var embPreview = "n/a";
+    var embStatus = "";
+    if (embedding && embedding.length > 0) {
+      var firstFew = Array.from(embedding.slice(0, 4)).map(function(v) { return v.toFixed(3); }).join(", ");
+      embPreview = "[" + firstFew + ", …]";
+      var sumSq = 0, hasNaN = false;
+      for (var k = 0; k < embedding.length; k++) {
+        if (isNaN(embedding[k])) hasNaN = true;
+        sumSq += embedding[k] * embedding[k];
+      }
+      if (hasNaN) embStatus = '<span class="err">NaN in Embedding!</span>';
+      else if (sumSq < 0.001) embStatus = '<span class="err">Embedding ≈ 0 (defekt!)</span>';
+      else embStatus = '<span class="ok">L2 ' + Math.sqrt(sumSq).toFixed(3) + ' ok</span>';
+    }
+
+    // Status zusammenstellen
+    var cropStatus;
+    if (variance < 10)         cropStatus = '<span class="err">Crop fast einfarbig (var ' + variance + ')</span>';
+    else if (rAvg + gAvg + bAvg < 30) cropStatus = '<span class="err">Crop fast schwarz</span>';
+    else if (rAvg + gAvg + bAvg > 720) cropStatus = '<span class="err">Crop überbelichtet</span>';
+    else cropStatus = '<span class="ok">Crop ok</span>';
+
+    stats.innerHTML =
+      'Crop: ' + sourceCanvas.width + '×' + sourceCanvas.height + ' (' + label + ')\n' +
+      'RGB-Mittel: ' + rAvg + ',' + gAvg + ',' + bAvg + ' var=' + variance + '\n' +
+      cropStatus + '\n' +
+      'Embed: ' + embPreview + '\n' +
+      embStatus;
+  }
+
+  // Verifikation: holt ein Referenz-Bild frisch, embeddet im Browser, vergleicht
+  // mit dem gespeicherten Wert. In Konsole: verifyStored(0) → erste Karte.
+  // Hohe Similarity (>0.95) = Pipeline match identisch. Niedrig = Build/Browser
+  // unterschiedlich → der Embedding-Build ist mit anderem Verfahren gemacht
+  // worden als das was der Browser im Live-Scan tut.
+  window.verifyStored = function(idx) {
+    idx = idx || 0;
+    if (!embedDb || !embedDb.cardIds[idx]) { console.warn("idx out of range"); return; }
+    var cardId = embedDb.cardIds[idx];
+    var card = (riftcodexCache || []).filter(function(c) { return c.riftcodexId === cardId; })[0];
+    if (!card || !card.imageUrl) { console.warn("Karte ohne imageUrl"); return; }
+    console.log("Verifiziere:", card.name, "URL:", card.imageUrl);
+    var img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = function() {
+      extractEmbedding(img).then(function(freshEmb) {
+        var dim = embedDb.dim;
+        var storedOff = idx * dim;
+        var dot = 0;
+        for (var i = 0; i < dim; i++) dot += freshEmb[i] * embedDb.embeddings[storedOff + i];
+        console.log("Browser-Fresh vs Stored Cosine =", dot.toFixed(4),
+                    dot > 0.95 ? "✓ identisch (Pipeline ok)" :
+                    dot > 0.7  ? "⚠ ähnlich aber abweichend" :
+                                 "✗ KOMPLETT VERSCHIEDEN — Node-Build kaputt");
+      });
+    };
+    img.onerror = function() { console.error("Image lädt nicht (CORS?)"); };
+    img.src = card.imageUrl;
+  };
+
+  // Sanity-Check: identischer Input MUSS identisches Embedding liefern.
+  // Wenn nicht → Modell ist nicht-deterministisch oder Memory-Bug.
+  window.verifyDeterministic = function() {
+    var c = document.getElementById("live-canvas");
+    if (!c || !c.width) { console.warn("Erst Live-Scan starten"); return; }
+    var crop = cropGuideBoxArea(c);
+    return extractEmbedding(crop).then(function(e1) {
+      return extractEmbedding(crop).then(function(e2) {
+        var diff = 0;
+        for (var i = 0; i < e1.length; i++) diff += Math.abs(e1[i] - e2[i]);
+        console.log("Deterministic check: diff =", diff.toFixed(6),
+                    diff < 0.001 ? "OK" : "PROBLEM");
+      });
+    });
+  };
 
   // Crop des Live-Frames mit konfigurierbaren Insets (in Prozent vom Frame).
   // Default = Guide-Box-Bereich. Bei niedriger Match-Confidence probieren
@@ -1831,6 +1963,8 @@
     var variants = multiCropVariants(canvas);
     var bestMatch = null;
     var bestLabel = null;
+    var bestCrop = null;
+    var bestEmb = null;
     return variants.reduce(function(prev, v) {
       return prev.then(function() {
         // Wenn schon ein klarer Treffer da → keine weiteren Crops
@@ -1840,11 +1974,21 @@
           if (m && (!bestMatch || m.bestSimilarity > bestMatch.bestSimilarity)) {
             bestMatch = m;
             bestLabel = v.label;
+            bestCrop = v.crop;
+            bestEmb = emb;
           }
         }).catch(function() { /* Crop überspringen bei Fehler */ });
       });
     }, Promise.resolve()).then(function() {
-      if (bestMatch) bestMatch.cropUsed = bestLabel;
+      if (bestMatch) {
+        bestMatch.cropUsed = bestLabel;
+        // VISUELLER DEBUG: zeige genau das Bild + Embedding das MobileNet bekam
+        try { debugShowEmbedInput(bestCrop, bestLabel, bestEmb); } catch(e) { console.warn("debug overlay:", e); }
+      } else {
+        // Auch wenn nix matched, zeige zumindest den ersten Crop um zu sehen
+        // ob die Pipeline überhaupt ein Bild produziert
+        try { debugShowEmbedInput(variants[0].crop, variants[0].label, null); } catch(e){}
+      }
       return bestMatch;
     });
   }
