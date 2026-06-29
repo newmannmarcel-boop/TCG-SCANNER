@@ -495,24 +495,38 @@
     return embedModelLoading;
   }
 
-  // Embedding aus Bild/Canvas extrahieren — gibt Float32Array(1280) zurück
-  // (normalisiert auf Länge 1 → Cosine-Similarity = Dot-Product)
+  // Embedding aus Bild/Canvas extrahieren — gibt Float32Array(1280) zurück.
+  // Pipeline: MobileNet-Output → L2-Norm → Mean-Subtraktion (gleiche Mean
+  // wie bei Referenzen aus zentrierter DB) → erneut L2-Norm.
+  // Dadurch landen Query und Referenzen im gleichen "zentrierten" Raum.
   function extractEmbedding(imgOrCanvas) {
     if (!embedModel) return Promise.reject(new Error("Modell nicht geladen"));
-    // model.infer(img, true) → Embedding-Layer statt Klassifikation
     var activation = embedModel.infer(imgOrCanvas, true);
     return activation.data().then(function(arr) {
       activation.dispose();
+      var dim = arr.length;
       // L2-Normalisierung
       var norm = 0;
-      for (var i = 0; i < arr.length; i++) norm += arr[i] * arr[i];
+      for (var i = 0; i < dim; i++) norm += arr[i] * arr[i];
       norm = Math.sqrt(norm);
+      var out = new Float32Array(dim);
       if (norm > 0) {
-        var out = new Float32Array(arr.length);
-        for (var i = 0; i < arr.length; i++) out[i] = arr[i] / norm;
-        return out;
+        for (var i = 0; i < dim; i++) out[i] = arr[i] / norm;
+      } else {
+        for (var i = 0; i < dim; i++) out[i] = arr[i];
       }
-      return new Float32Array(arr);
+      // Mean-Subtraktion (selber Mean wie bei den Referenz-Embeddings)
+      // → Query ist im gleichen zentrierten Raum
+      if (embedDb && embedDb.mean) {
+        var sumSq = 0;
+        for (var i = 0; i < dim; i++) {
+          out[i] -= embedDb.mean[i];
+          sumSq += out[i] * out[i];
+        }
+        var n2 = Math.sqrt(sumSq);
+        if (n2 > 0) for (var i = 0; i < dim; i++) out[i] /= n2;
+      }
+      return out;
     });
   }
 
@@ -524,42 +538,51 @@
   }
 
   // Findet beste Karten für ein Query-Embedding.
-  // WICHTIG: Riftcodex hat für viele Karten mehrere Einträge mit identischem
-  // Artwork (z.B. Teemo erscheint 4× in verschiedenen Sets/Promo-Varianten —
-  // gleiches Bild). Bilderkennung kann diese NICHT unterscheiden — sie haben
-  // identische Embeddings. Deshalb sammeln wir ALLE Karten innerhalb eines
-  // engen Similarity-Bands um die beste, und lassen die Filter (Promo/AltArt)
-  // bzw. eine User-Auswahl entscheiden.
+  //
+  // Wichtige Fixes gegen "immer dieselbe Karte gewinnt":
+  //   1) candidates werden nach Similarity DESC sortiert (nicht Insertion-
+  //      Order!). Damit ist candidates[0] wirklich die ähnlichste Karte.
+  //   2) Margin-Check: ein klarer Treffer braucht nicht nur hohe Similarity,
+  //      sondern auch deutlich höhere als der 2. Platz (sonst ist's geraten).
+  //   3) Tie-Band nur für IDENTISCHE Embeddings (Riftcodex hat Duplikate —
+  //      Teemo 4×) — sehr eng (0.0005), kein zufälliges Zusammenkleben.
   function findBestEmbeddingMatch(queryEmb) {
     if (!embedDb || !embedDb.cardIds.length) return null;
-    var bestSim = -Infinity;
     var dim = EMBED_DIM;
     var all = embedDb.embeddings;
     var N = embedDb.cardIds.length;
     var sims = new Float32Array(N);
-    // 1. Durchlauf: alle Similarities berechnen + Maximum finden
+    var bestSim = -Infinity, secondBestSim = -Infinity, bestIdx = -1;
     for (var i = 0; i < N; i++) {
       var s = 0, off = i * dim;
       for (var j = 0; j < dim; j++) s += queryEmb[j] * all[off + j];
       sims[i] = s;
-      if (s > bestSim) bestSim = s;
+      if (s > bestSim) { secondBestSim = bestSim; bestSim = s; bestIdx = i; }
+      else if (s > secondBestSim) { secondBestSim = s; }
     }
-    // 2. Durchlauf: alle Karten innerhalb 0.005 vom Best einsammeln
-    var tieBand = 0.005;
-    var candidates = [];
+    if (bestIdx < 0) return null;
+
+    // Tie-Band sehr eng — fängt nur echte Duplikate (identische Embeddings),
+    // nicht zufällig ähnliche Karten
+    var tieBand = 0.0005;
+    var tiePool = [];
     for (var k = 0; k < N; k++) {
       if (sims[k] >= bestSim - tieBand) {
         var cardId = embedDb.cardIds[k];
         var card = (riftcodexCache || []).filter(function(c) { return c.riftcodexId === cardId; })[0];
-        if (card) candidates.push({ card: card, similarity: sims[k] });
+        if (card) tiePool.push({ card: card, similarity: sims[k] });
       }
     }
-    if (candidates.length === 0) return null;
+    // Sortiere abfallend nach Similarity → candidates[0] ist wirklich die beste
+    tiePool.sort(function(a, b) { return b.similarity - a.similarity; });
+
+    var margin = bestSim - secondBestSim; // Wie viel besser als der 2. Platz?
     return {
-      candidates: candidates,
+      candidates: tiePool,
       bestSimilarity: bestSim,
-      // Für Backwards-Kompatibilität: card = die mit höchster Similarity (irgendeine bei Tie)
-      card: candidates[0].card,
+      secondBestSimilarity: secondBestSim,
+      margin: margin,
+      card: tiePool[0].card,
       similarity: bestSim
     };
   }
@@ -608,6 +631,38 @@
     ];
   }
 
+  // Subtrahiert das Mean-Embedding von allen Karten + renormalisiert L2.
+  // Hintergrund: MobileNet-Embeddings haben "Centroid-Karten" die jedem
+  // Query relativ ähnlich sind (z.B. weil ihre Farben/Komposition generisch
+  // sind). Durch Mean-Subtraktion verlieren sie ihren strukturellen Vorteil
+  // — die Discrimination zwischen ähnlichen vs unähnlichen Karten wird
+  // viel deutlicher. Klassische Technik aus dem Image-Retrieval-Bereich.
+  function centerEmbeddingDb(db) {
+    var n = db.cardIds.length;
+    var dim = db.dim;
+    var emb = db.embeddings;
+    var mean = new Float32Array(dim);
+    // 1. Mittelwert pro Dimension berechnen
+    for (var i = 0; i < n; i++) {
+      var off = i * dim;
+      for (var j = 0; j < dim; j++) mean[j] += emb[off + j];
+    }
+    for (var j = 0; j < dim; j++) mean[j] /= n;
+    // 2. Vom jedem Embedding abziehen + neu L2-normalisieren
+    for (var i = 0; i < n; i++) {
+      var off = i * dim;
+      var sumSq = 0;
+      for (var j = 0; j < dim; j++) {
+        emb[off + j] -= mean[j];
+        sumSq += emb[off + j] * emb[off + j];
+      }
+      var norm = Math.sqrt(sumSq);
+      if (norm > 0) for (var j = 0; j < dim; j++) emb[off + j] /= norm;
+    }
+    db.mean = mean; // für Query-Zentrierung gemerkt
+    return db;
+  }
+
   // Embedding-DB aus statischer JSON-Datei laden (im Repo mitgeliefert).
   // Format: { dim, cardIds: [...], embeddings: [[f32, ...], ...] }
   // Wir konvertieren die Arrays in eine flache Float32Array für schnellen Vergleich.
@@ -630,8 +685,10 @@
           var row = parsed.embeddings[i];
           for (var j = 0; j < dim; j++) flat[i * dim + j] = row[j];
         }
-        console.log("[Embeddings] Prebuilt geladen:", n, "Karten");
-        return { embeddings: flat, cardIds: parsed.cardIds, dim: dim };
+        var db = { embeddings: flat, cardIds: parsed.cardIds, dim: dim };
+        centerEmbeddingDb(db); // Centroid-Effekt eliminieren
+        console.log("[Embeddings] Prebuilt geladen + zentriert:", n, "Karten");
+        return db;
       })
       .catch(function(err) {
         console.warn("[Embeddings] Prebuilt nicht verfügbar:", err.message);
@@ -1755,11 +1812,14 @@
   //   ≥ 0.78 → sehr ähnlich, fast sicher dieselbe Karte → sofort bestätigen
   //   ≥ 0.65 → ähnlich, wahrscheinlich dieselbe → 2-Frame-Konsens
   //   <  0.65 → nicht klar → OCR-Fallback
-  // Schwellen vorerst niedriger — wir brauchen reale Similarity-Werte vom User
-  // um sie sinnvoll zu kalibrieren. Diagnose-Log in der Konsole zeigt die
-  // tatsächlichen Werte für jeden Scan.
-  var EMB_MATCH_STRONG = 0.55;
-  var EMB_MATCH_MEDIUM = 0.40;
+  // Schwellen für ZENTRIERTEN Embedding-Raum (Mean-subtrahiert).
+  // Werte sind hier deutlich niedriger als bei L2-only Cosine-Similarity:
+  // typisch ~0.4-0.6 für richtigen Match, ~0.0-0.2 für falsche.
+  // Plus zusätzlich Margin-Check (best - 2ndBest) gegen False Positives.
+  var EMB_MATCH_STRONG = 0.35;
+  var EMB_MATCH_MEDIUM = 0.20;
+  var EMB_MIN_MARGIN_STRONG = 0.08;  // ein klarer Treffer muss deutlich besser sein als der 2.
+  var EMB_MIN_MARGIN_MEDIUM = 0.04;  // bei medium: zumindest etwas Abstand
 
   // Konsens-Buffer für Embedding-Matches (analog zum OCR-Buffer)
   var liveRecentImgMatches = [];
@@ -1796,28 +1856,35 @@
     if (embedModel && embedDb && embedDb.cardIds.length > 0) {
       try {
         return findBestMatchAcrossCrops(canvas).then(function(match) {
-          // Diagnose: zeige IMMER die Top-3 ähnlichsten Karten + beste Similarity
           if (match && match.candidates && match.candidates.length > 0) {
             var top = match.candidates.slice(0, 3).map(function(c) {
               return (c.card.set || "?") + " " + (c.card.name || c.card.number || "?") +
-                     " (" + c.similarity.toFixed(2) + ")";
+                     " (" + c.similarity.toFixed(3) + ")";
             }).join("\n  ");
             console.log("[Embed-Match] Crop:", match.cropUsed,
                         "Beste:", match.bestSimilarity.toFixed(3),
-                        "Kandidaten:", match.candidates.length,
+                        "Margin:", (match.margin || 0).toFixed(3),
                         "Top-3:\n  " + top);
           }
-          if (match && match.card && match.similarity >= EMB_MATCH_MEDIUM) {
+          // Ein klarer Treffer braucht ZWEI Bedingungen: hohe Similarity
+          // UND deutlicher Abstand zum 2. Platz. Sonst war's geraten.
+          var sim = match ? match.similarity : 0;
+          var margin = match ? (match.margin || 0) : 0;
+          var isStrong = match && sim >= EMB_MATCH_STRONG && margin >= EMB_MIN_MARGIN_STRONG;
+          var isMedium = match && sim >= EMB_MATCH_MEDIUM && margin >= EMB_MIN_MARGIN_MEDIUM;
+          if (isStrong || isMedium) {
+            match.isStrong = isStrong;
             return handleEmbeddingMatch(canvas, match);
           }
-          // schwacher Match → OCR als Fallback. Zeige Top-3 zum Debuggen
+          // Kein konfidenter Match → OCR als Fallback
           if (match) {
             var topText = match.candidates.slice(0, 3).map(function(c) {
-              return "  " + (c.card.name || c.card.number || "?") + " (" + c.similarity.toFixed(2) + ")";
+              return "  " + (c.card.name || c.card.number || "?") + " (" + c.similarity.toFixed(3) + ")";
             }).join("\n");
             updateScanDiag(null,
-              "Kein klarer Bild-Match. Beste Similarity: " + match.similarity.toFixed(2) +
-              " (Crop " + match.cropUsed + ") — Top-3:\n" + topText +
+              "Kein klarer Bild-Match. Best: " + sim.toFixed(3) +
+              " | Margin: " + margin.toFixed(3) +
+              " | Crop: " + match.cropUsed + "\nTop-3:\n" + topText +
               "\nOCR-Fallback läuft …",
               "warn");
           }
