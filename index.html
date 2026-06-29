@@ -1907,18 +1907,19 @@
   // mit identischem Artwork in verschiedenen Sets/Promo-Varianten).
   function handleEmbeddingMatch(canvas, match) {
     var sim = match.bestSimilarity;
+    var margin = match.margin || 0;
     var cands = match.candidates;
-    // Cluster-Key für Konsens: sortierte cardIds → stabil über Frames hinweg
     var clusterKey = cands.map(function(c) { return c.card.riftcodexId; }).sort().join("|");
-    var lead = cands[0].card;
+    var lead = cands[0].card; // jetzt wirklich die ähnlichste durch sort()
     var label = (lead.set || "?") + " · " + (lead.name || lead.number || "?") +
                 (cands.length > 1 ? " (+" + (cands.length - 1) + " Variante" + (cands.length > 2 ? "n" : "") + ")" : "");
 
-    if (sim >= EMB_MATCH_STRONG) {
+    // Strong = hohe Similarity UND deutlicher Margin → sofort bestätigen
+    if (match.isStrong) {
       liveRecentImgMatches = [];
       setLiveStatusPill("Erkannt: " + label, true);
       updateScanDiag(null,
-        "Bild-Match: " + label + "  (Similarity " + sim.toFixed(2) + ", sicher)",
+        "Bild-Match: " + label + "  (Sim " + sim.toFixed(3) + ", Margin " + margin.toFixed(3) + ", sicher)",
         "ok");
       return finalizeEmbeddingMatch(canvas, cands);
     }
@@ -1935,14 +1936,14 @@
       liveRecentImgMatches = [];
       setLiveStatusPill("Bestätigt: " + label, true);
       updateScanDiag(null,
-        "Bild-Match bestätigt: " + label + "  (Similarity " + sim.toFixed(2) + ", 2× gesehen)",
+        "Bild-Match bestätigt: " + label + "  (Sim " + sim.toFixed(3) + ", Margin " + margin.toFixed(3) + ", 2× gesehen)",
         "ok");
       return finalizeEmbeddingMatch(canvas, cands);
     }
 
     setLiveStatusPill(label + " (1× — warte auf 2×)", true);
     updateScanDiag(null,
-      "Bild-Match: " + label + " — Similarity " + sim.toFixed(2) + ", brauche 2. Bestätigung",
+      "Bild-Match: " + label + " — Sim " + sim.toFixed(3) + ", Margin " + margin.toFixed(3) + ", brauche 2. Bestätigung",
       "warn");
     liveBusy = false;
     return null;
