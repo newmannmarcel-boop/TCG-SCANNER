@@ -627,8 +627,12 @@
 
   // Plausibilitätsprüfung: Müll-Treffer wie "1/51" aus Karten-Artwork
   // oder Rarity-Sternen frühzeitig verwerfen.
+  // Wichtig: Overnumber-Karten (z.B. 309/298) sind GÜLTIG — die Nummer
+  // darf größer sein als die Gesamtanzahl. Wir erlauben bis zum 2-fachen.
   function isPlausibleCardNumber(num, total) {
-    if (total < 100 || num < 1 || num > total) return false;
+    if (total < 100) return false;
+    if (num < 1) return false;
+    if (num > total * 2) return false; // 309/298 ok, 999/100 nicht
     var known = getKnownSetTotals();
     if (known && known.length) {
       var nearKnown = known.some(function(t) { return Math.abs(t - total) <= 10; });
