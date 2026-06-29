@@ -832,29 +832,40 @@
       }
 
       // ----- Total-basierter Pfad (Fallback ohne Set-Code) -----
-      // STRENGER als vorher: nur exakter Total-Match oder ±2 zulässig.
-      // Vorher ±12 war zu großzügig und produzierte falsche Sets.
+      // Bevorzuge IMMER das Set mit exaktem Total-Match. Nur wenn OCR die
+      // Gesamtzahl unscharf gelesen hat (bestDiff > 0) ein zweites Set
+      // innerhalb ±2 noch zulassen.
       var totals = {};
       byNum.forEach(function (card) {
         var p = parseParts(card.number);
         if (p) totals[p.total] = (totals[p.total] || 0) + 1;
       });
-      var matchingTotals = Object.keys(totals)
-        .map(function(t) { return parseInt(t, 10); })
-        .filter(function(t) { return Math.abs(t - totalNum) <= 2; });
-      if (matchingTotals.length === 0) {
-        // Kein Set hat eine Gesamtzahl in der Nähe → OCR hat die Total wohl falsch
-        // gelesen. Lieber leer zurückgeben statt falsches Set raten.
+      var bestTotal = null, bestDiff = Infinity;
+      Object.keys(totals).forEach(function (t) {
+        var d = Math.abs(parseInt(t, 10) - totalNum);
+        if (d < bestDiff) { bestDiff = d; bestTotal = parseInt(t, 10); }
+      });
+      // Sicherheit: wenn nächstes Set extrem weit weg (>15) → OCR-Fehler
+      if (bestDiff > 15) {
         window._lastSearchDiag = {
           number: number, setCode: setCode, matchedSet: null,
-          reason: "Keine Gesamtzahl in Datenbank passt (±2 zu OCR " + totalNum + ")"
+          reason: "Kein Set in Nähe von Total " + totalNum + " (min Abstand " + bestDiff + ")"
         };
         return [];
       }
 
+      var includedTotals = [bestTotal];
+      if (bestDiff > 0) {
+        Object.keys(totals).forEach(function (t) {
+          var tNum = parseInt(t, 10);
+          if (tNum === bestTotal) return;
+          if (Math.abs(tNum - totalNum) <= 2) includedTotals.push(tNum);
+        });
+      }
+
       var results = byNum.filter(function (card) {
         var p = parseParts(card.number);
-        return p && matchingTotals.indexOf(p.total) !== -1;
+        return p && includedTotals.indexOf(p.total) !== -1;
       });
 
       if (results.length > 8) {
@@ -867,7 +878,7 @@
 
       window._lastSearchDiag = {
         number: number, setCode: setCode || "(nicht gelesen)",
-        matchedSet: "Total " + matchingTotals.join("/"),
+        matchedSet: "Total " + includedTotals.join("/") + (bestDiff === 0 ? " (exakt)" : " (±" + bestDiff + ")"),
         reason: setCodeUp ? "Set-Code passte nicht — Fallback auf Total" : "Nur Total (kein Set-Code gelesen)",
         candidateCount: results.length
       };
@@ -1307,11 +1318,6 @@
       return runOcrOnCanvas();
     }
 
-    // Vor jedem Capture: Fokus auf den Nummern-Bereich anstoßen.
-    // Auf Android Chrome bewirkt das ein Re-Fokussieren auf diesen Punkt
-    // (statt dass der Continuous-AF z.B. die Kartenmitte erwischt).
-    applyNumberAreaFocus(liveTorchTrack);
-
     // Scan-Modus: Blitz kurz vor dem Capture an, ~180ms warten damit
     // die Belichtungs-Automatik sich auf das hellere Bild einstellt
     if (liveTorchMode === "scan") {
@@ -1320,8 +1326,7 @@
       });
       return;
     }
-    // Sonst: kurzer Delay damit der Fokus sich setzen kann (~120ms)
-    setTimeout(doCaptureAndOCR, 120);
+    doCaptureAndOCR();
   }
 
   function runOcrOnCanvas() {
