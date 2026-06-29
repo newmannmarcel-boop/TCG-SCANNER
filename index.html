@@ -728,14 +728,14 @@
 
   function findCardNumberTesseract(canvas, W, H) {
     if (typeof Tesseract === "undefined") return Promise.resolve(null);
-    // Gezielter Mini-Crop: unten-links, wo die Nummer auf TCG-Karten steht
-    // (Guide-Box: left 14%, bottom 12% → Karte unten ≈ 88% H, links ≈ 16% W)
-    // Sehr kleine Bildfläche → Tesseract läuft 5-10× schneller pro Versuch
-    var nbX = Math.floor(W * 0.14);
-    var nbW = Math.floor(W * 0.40);  // linke 40% des Bilds
-    var nbY = Math.floor(H * 0.83);
-    var nbH = Math.floor(H * 0.10);
-    // Auf moderate OCR-Größe skalieren (Ziel ~800px breit, Text ~40px hoch)
+    // Gezielter Crop: unten-links, wo die Nummer auf TCG-Karten steht.
+    // Wichtig — Crop bewusst LARGER als nötig damit Ziffern am Rand nicht
+    // abgeschnitten werden (z.B. wenn Karte leicht verschoben liegt und
+    // das erste "2" außerhalb des engen Crops landet → wurde als "0" gelesen)
+    var nbX = Math.floor(W * 0.08);   // bisschen weiter links für Puffer
+    var nbW = Math.floor(W * 0.52);   // breiter — fängt schiefe Karten
+    var nbY = Math.floor(H * 0.78);   // bisschen höher für Puffer
+    var nbH = Math.floor(H * 0.15);   // höher
     var nbScale = Math.max(1.5, Math.min(3, 800 / nbW));
 
     var scBase = Math.max(1.5, Math.min(2.5, 1000 / W));
@@ -758,16 +758,24 @@
       { make: function() { return toGrayscale(lo50()); },         psm: "11" }
     ];
     return getOCRWorker().then(function(worker) {
-      // Set-Code wird über ALLE Versuche aggregiert — auch wenn die Nummer
-      // erst im 3. Versuch gefunden wird, kann der Code aus Versuch 1+2 kommen
-      var foundInfo = null;
+      // Within-Frame-Konsens: eine Nummer wird "strong" wenn ZWEI verschiedene
+      // Preprocessing-Varianten dasselbe lesen. Schützt gegen systematische
+      // OCR-Fehler (z.B. "242" immer als "042" weil erstes "2" am Crop-Rand).
+      // Hat ein Frame eine "strong"-Lesung → wird sofort bestätigt (kein
+      // zweiter Frame nötig). Eine "weak" Einzellesung wandert in den Multi-
+      // Frame-Buffer für die übliche 2×-Bestätigung.
+      var allReads = [];
       var aggregateSetCode = null;
+
       function next(i) {
         if (i >= attempts.length) {
-          if (foundInfo && !foundInfo.setCode && aggregateSetCode) {
-            foundInfo.setCode = aggregateSetCode;
+          if (allReads.length === 1) {
+            var only = allReads[0];
+            if (!only.setCode && aggregateSetCode) only.setCode = aggregateSetCode;
+            only.strong = false;
+            return only;
           }
-          return foundInfo;
+          return null;
         }
         var a = attempts[i];
         return applyPsm(worker, a.psm)
@@ -776,14 +784,16 @@
             var text = r.data.text || "";
             var sc = extractSetCode(text);
             if (sc && !aggregateSetCode) aggregateSetCode = sc;
-            if (!foundInfo) {
-              var info = parseCardInfo(text);
-              if (info) foundInfo = info;
-            }
-            // Wenn Nummer UND Set-Code da sind → wir können stoppen (schnell)
-            if (foundInfo && (foundInfo.setCode || aggregateSetCode)) {
-              if (!foundInfo.setCode) foundInfo.setCode = aggregateSetCode;
-              return foundInfo;
+            var info = parseCardInfo(text);
+            if (info) {
+              for (var j = 0; j < allReads.length; j++) {
+                if (allReads[j].number === info.number) {
+                  info.setCode = info.setCode || allReads[j].setCode || aggregateSetCode;
+                  info.strong = true; // Within-Frame-Konsens erreicht
+                  return info;
+                }
+              }
+              allReads.push(info);
             }
             return next(i + 1);
           })
@@ -1456,7 +1466,11 @@
 
       // Lesung in den Konsens-Buffer aufnehmen
       rememberRead(info);
-      var confirmed = findConfirmedRead();
+      // "strong" Lesung (Within-Frame-Konsens) bestätigt sofort, keine zweite
+      // Frame-Bestätigung nötig. Eine "weak" Einzellesung braucht 2× im Buffer.
+      var confirmed = info.strong
+        ? { number: info.number, setCode: info.setCode || null }
+        : findConfirmedRead();
 
       if (!confirmed) {
         // Erst eine einzelne Lesung — auf Bestätigung warten
