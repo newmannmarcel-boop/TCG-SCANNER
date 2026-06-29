@@ -518,37 +518,85 @@
   // Embedding aus Bild/Canvas extrahieren — gibt Float32Array(1280) zurück.
   // Pipeline: MobileNet-Output → L2-Norm → Mean-Subtraktion (gleiche Mean
   // wie bei Referenzen aus zentrierter DB) → erneut L2-Norm.
-  // Dadurch landen Query und Referenzen im gleichen "zentrierten" Raum.
+  //
+  // Defensiver Aufbau gegen Memory-Leaks und State-Bugs:
+  //   1. tf.tidy() um alle internen Tensoren synchron aufzuräumen.
+  //      Da .data() asynchron ist, muss die VERWENDUNG des Tensors innerhalb
+  //      von tidy passieren — wir holen die Daten innerhalb von tidy via
+  //      .dataSync() (synchron, blockiert kurz) statt .data() (async).
+  //   2. Kopie der Daten in ein eigenes Float32Array bevor dispose, damit
+  //      keine Backend-spezifischen view-into-tensor-Surprises auftreten.
+  //   3. Mean wird IMMER aus einem unveränderten Snapshot gelesen, nie zurück
+  //      in embedDb.mean geschrieben → keine doppelte Zentrierung möglich.
   function extractEmbedding(imgOrCanvas) {
     if (!embedModel) return Promise.reject(new Error("Modell nicht geladen"));
-    var activation = embedModel.infer(imgOrCanvas, true);
-    return activation.data().then(function(arr) {
-      activation.dispose();
-      var dim = arr.length;
-      // L2-Normalisierung
-      var norm = 0;
-      for (var i = 0; i < dim; i++) norm += arr[i] * arr[i];
-      norm = Math.sqrt(norm);
-      var out = new Float32Array(dim);
-      if (norm > 0) {
-        for (var i = 0; i < dim; i++) out[i] = arr[i] / norm;
-      } else {
-        for (var i = 0; i < dim; i++) out[i] = arr[i];
-      }
-      // Mean-Subtraktion (selber Mean wie bei den Referenz-Embeddings)
-      // → Query ist im gleichen zentrierten Raum
-      if (embedDb && embedDb.mean) {
-        var sumSq = 0;
-        for (var i = 0; i < dim; i++) {
-          out[i] -= embedDb.mean[i];
-          sumSq += out[i] * out[i];
+    return new Promise(function(resolve, reject) {
+      try {
+        var arrCopy = tf.tidy(function() {
+          var activation = embedModel.infer(imgOrCanvas, true);
+          // dataSync() innerhalb tidy → activation wird automatisch disposed
+          // Wir kopieren die Daten in ein eigenes Array
+          var data = activation.dataSync();
+          var copy = new Float32Array(data.length);
+          for (var i = 0; i < data.length; i++) copy[i] = data[i];
+          return copy;
+        });
+        // arrCopy ist jetzt ein eigenständiges Float32Array, kein Tensor-View
+
+        var dim = arrCopy.length;
+        // Sanity: NaN/Inf in MobileNet-Output?
+        var hasNaN = false;
+        for (var k = 0; k < dim; k++) {
+          if (!isFinite(arrCopy[k])) { hasNaN = true; break; }
         }
-        var n2 = Math.sqrt(sumSq);
-        if (n2 > 0) for (var i = 0; i < dim; i++) out[i] /= n2;
+        if (hasNaN) {
+          console.warn("[Embed] MobileNet-Output enthält NaN/Inf!");
+          return reject(new Error("NaN in MobileNet output"));
+        }
+
+        // L2-Norm 1: arrCopy → out
+        var norm = 0;
+        for (var i = 0; i < dim; i++) norm += arrCopy[i] * arrCopy[i];
+        norm = Math.sqrt(norm);
+        var out = new Float32Array(dim);
+        if (norm > 0) {
+          for (var i = 0; i < dim; i++) out[i] = arrCopy[i] / norm;
+        } else {
+          for (var i = 0; i < dim; i++) out[i] = arrCopy[i];
+        }
+
+        // Mean-Subtraktion (READ embedDb.mean, NEVER WRITE)
+        if (embedDb && embedDb.mean) {
+          var meanRef = embedDb.mean; // read-only Snapshot-Referenz
+          var sumSq = 0;
+          for (var i = 0; i < dim; i++) {
+            out[i] -= meanRef[i];
+            sumSq += out[i] * out[i];
+          }
+          var n2 = Math.sqrt(sumSq);
+          if (n2 > 0) for (var i = 0; i < dim; i++) out[i] /= n2;
+        }
+        resolve(out);
+      } catch (e) {
+        reject(e);
       }
-      return out;
     });
   }
+
+  // Hilfs-Hash: schneller Fingerprint eines Canvas-Inhalts.
+  // Wenn aufeinanderfolgende Scans denselben Hash haben → Video ist gefroren.
+  function quickCanvasHash(canvas) {
+    try {
+      var data = canvas.getContext("2d").getImageData(0, 0, Math.min(canvas.width, 50), Math.min(canvas.height, 50)).data;
+      var h = 0;
+      for (var i = 0; i < data.length; i += 64) {
+        h = ((h << 5) - h + data[i]) | 0;
+      }
+      return h;
+    } catch (e) { return 0; }
+  }
+  var _lastCanvasHash = 0;
+  var _scanCounter = 0;
 
   // Cosine-Similarity zwischen zwei normalisierten Embeddings
   function cosineSim(a, b) {
@@ -623,7 +671,7 @@
   // Visueller Debug-Output: zeigt exakt das Bild das MobileNet als Input
   // bekommt, plus Pixel-Statistiken. Wenn das Bild leer/schwarz/eintönig ist,
   // erkennen wir das Problem sofort visuell statt aus Similarity-Zahlen.
-  function debugShowEmbedInput(sourceCanvas, label, embedding) {
+  function debugShowEmbedInput(sourceCanvas, label, embedding, scanNum, frozen) {
     var dbg = document.getElementById("edp-canvas");
     var stats = document.getElementById("edp-stats");
     if (!dbg || !stats) return;
@@ -678,7 +726,9 @@
     else if (rAvg + gAvg + bAvg > 720) cropStatus = '<span class="err">Crop überbelichtet</span>';
     else cropStatus = '<span class="ok">Crop ok</span>';
 
+    var scanInfo = scanNum != null ? 'Scan #' + scanNum + (frozen ? ' <span class="err">VIDEO GEFROREN!</span>' : '') + '\n' : '';
     stats.innerHTML =
+      scanInfo +
       'Crop: ' + sourceCanvas.width + '×' + sourceCanvas.height + ' (' + label + ')\n' +
       'RGB-Mittel: ' + rAvg + ',' + gAvg + ',' + bAvg + ' var=' + variance + '\n' +
       cropStatus + '\n' +
@@ -770,6 +820,11 @@
   // — die Discrimination zwischen ähnlichen vs unähnlichen Karten wird
   // viel deutlicher. Klassische Technik aus dem Image-Retrieval-Bereich.
   function centerEmbeddingDb(db) {
+    // Schutz gegen doppelte Zentrierung — würde Embeddings zerstören
+    if (db._centered) {
+      console.warn("[Embeddings] centerEmbeddingDb übersprungen — bereits zentriert");
+      return db;
+    }
     var n = db.cardIds.length;
     var dim = db.dim;
     var emb = db.embeddings;
@@ -792,6 +847,7 @@
       if (norm > 0) for (var j = 0; j < dim; j++) emb[off + j] /= norm;
     }
     db.mean = mean; // für Query-Zentrierung gemerkt
+    db._centered = true; // Doppel-Zentrierungs-Schutz
     return db;
   }
 
@@ -1960,6 +2016,20 @@
   // mit der höchsten Match-Confidence. Stop-Early wenn ein Crop schon einen
   // sehr klaren Treffer liefert (>= STRONG-Schwelle).
   function findBestMatchAcrossCrops(canvas) {
+    _scanCounter++;
+    var canvasHash = quickCanvasHash(canvas);
+    var canvasFrozen = canvasHash !== 0 && canvasHash === _lastCanvasHash;
+    _lastCanvasHash = canvasHash;
+    var memBefore = (tf && tf.memory) ? tf.memory() : null;
+    if (canvasFrozen) {
+      console.warn("[Scan #" + _scanCounter + "] CANVAS HASH IDENTISCH MIT VORGÄNGER — Video gefroren?");
+    }
+    if (memBefore) {
+      console.log("[Scan #" + _scanCounter + "] tf.memory() vor Scan:",
+                  "numTensors=" + memBefore.numTensors,
+                  "numBytes=" + memBefore.numBytes,
+                  "canvasHash=0x" + (canvasHash >>> 0).toString(16));
+    }
     var variants = multiCropVariants(canvas);
     var bestMatch = null;
     var bestLabel = null;
@@ -1980,14 +2050,27 @@
         }).catch(function() { /* Crop überspringen bei Fehler */ });
       });
     }, Promise.resolve()).then(function() {
+      var memAfter = (tf && tf.memory) ? tf.memory() : null;
+      if (memAfter && memBefore) {
+        var leaked = memAfter.numTensors - memBefore.numTensors;
+        var byteLeak = memAfter.numBytes - memBefore.numBytes;
+        console.log("[Scan #" + _scanCounter + "] tf.memory() nach Scan:",
+                    "numTensors=" + memAfter.numTensors,
+                    "Δtensors=" + leaked,
+                    "Δbytes=" + byteLeak);
+        if (leaked > 0) {
+          console.warn("[Scan #" + _scanCounter + "] TENSOR LEAK: " + leaked + " Tensoren nicht disposed!");
+        }
+      }
       if (bestMatch) {
         bestMatch.cropUsed = bestLabel;
+        bestMatch.canvasFrozen = canvasFrozen;
         // VISUELLER DEBUG: zeige genau das Bild + Embedding das MobileNet bekam
-        try { debugShowEmbedInput(bestCrop, bestLabel, bestEmb); } catch(e) { console.warn("debug overlay:", e); }
+        try { debugShowEmbedInput(bestCrop, bestLabel, bestEmb, _scanCounter, canvasFrozen); }
+        catch(e) { console.warn("debug overlay:", e); }
       } else {
-        // Auch wenn nix matched, zeige zumindest den ersten Crop um zu sehen
-        // ob die Pipeline überhaupt ein Bild produziert
-        try { debugShowEmbedInput(variants[0].crop, variants[0].label, null); } catch(e){}
+        try { debugShowEmbedInput(variants[0].crop, variants[0].label, null, _scanCounter, canvasFrozen); }
+        catch(e){}
       }
       return bestMatch;
     });
