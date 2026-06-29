@@ -171,6 +171,27 @@
     30%  { transform: scale(1.0); opacity: 1; }
     100% { transform: scale(0.8); opacity: 0; }
   }
+  /* Fester Fokus-Anker am Nummern-Bereich (unten-links der Karte) */
+  .live-focus-hint {
+    position: absolute; left: 22%; bottom: 18%;
+    width: 36px; height: 36px; border-radius: 50%;
+    border: 1.5px solid rgba(201,162,75,0.85);
+    box-shadow: 0 0 0 2px rgba(0,0,0,0.3);
+    pointer-events: none; font-size: 9px; color: rgba(201,162,75,0.85);
+    display: flex; align-items: center; justify-content: center; font-weight: 600;
+    letter-spacing: 0.3px;
+  }
+  .live-scan-diag {
+    margin: 6px 0 8px; padding: 7px 10px; border-radius: 8px;
+    background: #1A1710; border: 1px solid #2A2618;
+    font-size: 11px; color: #A89F8A; line-height: 1.4;
+    font-variant-numeric: tabular-nums; font-family: ui-monospace, Menlo, Consolas, monospace;
+    white-space: pre-line;
+  }
+  .live-scan-diag.ok   { border-color: #3A4A2A; color: #C9D4A8; }
+  .live-scan-diag.warn { border-color: #4A3A1A; color: #D4B49A; }
+  .live-scan-diag.err  { border-color: #4A2E1E; color: #D4A49A; }
+  .live-scan-diag.hidden { display: none; }
   .live-frame-guide {
     /* TCG-Karte 63×88mm = 1.4:1 — Im 3:4-Container: Breite 72% → Höhe ≈ 76% → AR=1.41 */
     position: absolute; top: 12%; left: 14%; right: 14%; bottom: 12%;
@@ -295,7 +316,9 @@
       <div class="live-cam-info" id="live-cam-info">— × —</div>
       <button type="button" id="live-torch-btn" class="live-torch-btn hidden">Blitz aus</button>
       <div class="live-frame-guide"></div>
+      <div class="live-focus-hint" id="live-focus-hint">Fokus</div>
     </div>
+    <div id="live-scan-diag" class="live-scan-diag hidden"></div>
     <button type="button" id="live-scan-stop-btn" class="btn-secondary focus-ring" style="width: 100%;">✕ Live-Scan beenden</button>
   </div>
   <canvas id="live-canvas" class="hidden"></canvas>
@@ -536,21 +559,21 @@
     oCtx.putImageData(oId, 0, 0); return out;
   }
 
+  // Extrahiert einen Set-Code (3 Großbuchstaben) aus einem Text
+  // Bevorzugt Codes die direkt vor einer Zahl stehen ("OGN 165/298")
+  function extractSetCode(text) {
+    if (!text) return null;
+    var nearNumber = text.match(/\b([A-Z]{3})[\s\-_]*\d/);
+    if (nearNumber) return nearNumber[1];
+    var any = text.match(/\b([A-Z]{3})\b/);
+    return any ? any[1] : null;
+  }
+
   // Parst Kartennummer UND Set-Code (z.B. "OGN", "SFD") aus OCR-Text
   // → { number: "165/298", setCode: "OGN" } oder null wenn keine Nummer gefunden
   function parseCardInfo(text) {
     var raw = text || "";
-    // Set-Code: exakt 3 Großbuchstaben (vermeidet falsche 2-Buchstaben-Treffer
-    // wie "EN" Sprachcode oder Initialen vom Künstler). Aus ALLEN Vorkommen
-    // wird das genommen das einer Zahl benachbart ist, sonst das erste.
-    var setCode = null;
-    var allCaps = raw.match(/\b[A-Z]{3}\b/g) || [];
-    if (allCaps.length) {
-      // Bevorzuge Codes die direkt vor einer Zahl stehen (z.B. "OGN 165/298")
-      var nearNumber = raw.match(/\b([A-Z]{3})[\s\-_]*\d/);
-      setCode = nearNumber ? nearNumber[1] : allCaps[0];
-    }
-    // Nummer mit OCR-Korrekturen
+    var setCode = extractSetCode(raw);
     var t = raw.replace(/\s+/g, "")
       .replace(/[oO]/g, "0").replace(/[lLI|]/g, "1").replace(/[bB]/g, "6");
     var m = t.match(/(\d{1,4})[*xX]?\/(\d{1,4})/);
@@ -633,12 +656,35 @@
       { make: function() { return toGrayscale(lo50()); },         psm: "11" }
     ];
     return getOCRWorker().then(function(worker) {
+      // Set-Code wird über ALLE Versuche aggregiert — auch wenn die Nummer
+      // erst im 3. Versuch gefunden wird, kann der Code aus Versuch 1+2 kommen
+      var foundInfo = null;
+      var aggregateSetCode = null;
       function next(i) {
-        if (i >= attempts.length) return null;
+        if (i >= attempts.length) {
+          if (foundInfo && !foundInfo.setCode && aggregateSetCode) {
+            foundInfo.setCode = aggregateSetCode;
+          }
+          return foundInfo;
+        }
         var a = attempts[i];
         return applyPsm(worker, a.psm)
           .then(function() { return worker.recognize(a.make()); })
-          .then(function(r) { return parseCardInfo(r.data.text) || next(i + 1); })
+          .then(function(r) {
+            var text = r.data.text || "";
+            var sc = extractSetCode(text);
+            if (sc && !aggregateSetCode) aggregateSetCode = sc;
+            if (!foundInfo) {
+              var info = parseCardInfo(text);
+              if (info) foundInfo = info;
+            }
+            // Wenn Nummer UND Set-Code da sind → wir können stoppen (schnell)
+            if (foundInfo && (foundInfo.setCode || aggregateSetCode)) {
+              if (!foundInfo.setCode) foundInfo.setCode = aggregateSetCode;
+              return foundInfo;
+            }
+            return next(i + 1);
+          })
           .catch(function() { return next(i + 1); });
       }
       return next(0);
@@ -758,59 +804,82 @@
         var p = parseParts(card.number);
         return p && p.num === baseNum;
       });
-      if (byNum.length === 0) return [];
+      if (byNum.length === 0) {
+        window._lastSearchDiag = { number: number, setCode: setCode, matchedSet: null, reason: "Nummer nicht im Cache" };
+        return [];
+      }
 
-      // Wenn Set-Code gelesen wurde: zuerst nach Set-Code filtern
-      // (matches gegen setId ODER ersten Buchstaben des riftbound_id)
+      // ----- Set-Code Pfad (strikter, weniger fehleranfällig) -----
+      // Wenn ein Set-Code gelesen wurde UND ein Set in der Datenbank exakt passt
+      // → ausschließlich Karten aus diesem Set zurückgeben, ohne Total-Filter.
+      // Das ist die zuverlässigste Disambiguierung wenn der Code korrekt ist.
       if (setCodeUp) {
         var bySet = byNum.filter(function (card) {
           var sid = (card.setId || "").toUpperCase();
-          if (sid && sid === setCodeUp) return true;
-          // Fallback: erste Buchstaben von riftbound_id (z.B. "uni-..." → "UNI")
-          var rcPrefix = (card.number || "").split("-")[0];
-          return rcPrefix && rcPrefix.toUpperCase() === setCodeUp;
+          return sid === setCodeUp;
         });
-        if (bySet.length > 0) byNum = bySet;
+        if (bySet.length > 0) {
+          window._lastSearchDiag = {
+            number: number, setCode: setCode,
+            matchedSet: setCodeUp, reason: "Set-Code exakt gematched",
+            candidateCount: bySet.length
+          };
+          return sortByOvernumber(bySet, hasStar);
+        }
+        // Set-Code gelesen aber kein Match → könnte OCR-Fehler beim Code sein
+        // (z.B. "OCN" statt "OGN"). Weiter mit Total-basiertem Fallback,
+        // aber Diagnose merken.
       }
 
-      // Nächstes Set nach OCR-Gesamtzahl bestimmen
+      // ----- Total-basierter Pfad (Fallback ohne Set-Code) -----
+      // STRENGER als vorher: nur exakter Total-Match oder ±2 zulässig.
+      // Vorher ±12 war zu großzügig und produzierte falsche Sets.
       var totals = {};
       byNum.forEach(function (card) {
         var p = parseParts(card.number);
         if (p) totals[p.total] = (totals[p.total] || 0) + 1;
       });
-      var bestTotal = null, bestDiff = Infinity;
-      Object.keys(totals).forEach(function (t) {
-        var diff = Math.abs(parseInt(t, 10) - totalNum);
-        if (diff < bestDiff) { bestDiff = diff; bestTotal = parseInt(t, 10); }
-      });
-
-      // Nur Karten aus dem nächsten Set — plus zweites Set wenn sehr nah (±5)
-      // Schützt vor OCR-Fehlern wie "219"↔"221" ohne zu viele Sets einzubeziehen
-      var includedTotals = [bestTotal];
-      if (bestDiff > 0) {
-        Object.keys(totals).forEach(function (t) {
-          var tNum = parseInt(t, 10);
-          if (tNum === bestTotal) return;
-          var d = Math.abs(tNum - totalNum);
-          if (d <= bestDiff + 3 && d <= 12) includedTotals.push(tNum);
-        });
+      var matchingTotals = Object.keys(totals)
+        .map(function(t) { return parseInt(t, 10); })
+        .filter(function(t) { return Math.abs(t - totalNum) <= 2; });
+      if (matchingTotals.length === 0) {
+        // Kein Set hat eine Gesamtzahl in der Nähe → OCR hat die Total wohl falsch
+        // gelesen. Lieber leer zurückgeben statt falsches Set raten.
+        window._lastSearchDiag = {
+          number: number, setCode: setCode, matchedSet: null,
+          reason: "Keine Gesamtzahl in Datenbank passt (±2 zu OCR " + totalNum + ")"
+        };
+        return [];
       }
 
       var results = byNum.filter(function (card) {
         var p = parseParts(card.number);
-        return p && includedTotals.indexOf(p.total) !== -1;
+        return p && matchingTotals.indexOf(p.total) !== -1;
       });
 
-      // Sanity-Check: zu viele Varianten → OCR hat wahrscheinlich falsch gelesen
-      if (results.length > 8) return [];
+      if (results.length > 8) {
+        window._lastSearchDiag = {
+          number: number, setCode: setCode, matchedSet: null,
+          reason: "Zu viele Treffer (" + results.length + ") — wahrscheinlich OCR-Fehler"
+        };
+        return [];
+      }
 
-      results.sort(function (a, b) {
-        var aStar = (a.number || "").indexOf("*") !== -1 ? 1 : 0;
-        var bStar = (b.number || "").indexOf("*") !== -1 ? 1 : 0;
-        return hasStar ? bStar - aStar : aStar - bStar;
-      });
-      return results;
+      window._lastSearchDiag = {
+        number: number, setCode: setCode || "(nicht gelesen)",
+        matchedSet: "Total " + matchingTotals.join("/"),
+        reason: setCodeUp ? "Set-Code passte nicht — Fallback auf Total" : "Nur Total (kein Set-Code gelesen)",
+        candidateCount: results.length
+      };
+      return sortByOvernumber(results, hasStar);
+    });
+  }
+
+  function sortByOvernumber(results, hasStar) {
+    return results.slice().sort(function (a, b) {
+      var aStar = (a.number || "").indexOf("*") !== -1 ? 1 : 0;
+      var bStar = (b.number || "").indexOf("*") !== -1 ? 1 : 0;
+      return hasStar ? bStar - aStar : aStar - bStar;
     });
   }
 
@@ -1039,6 +1108,9 @@
 
       // Tap-to-Focus auf das Live-Bild — bessere Schärfe bei Nahaufnahmen
       setupTapToFocus(video, track);
+      // Auto-Fokus standardmäßig auf den Nummern-Bereich (unten-links)
+      // Erst nach kurzer Verzögerung damit Kamera initialisiert ist
+      setTimeout(function() { applyNumberAreaFocus(track); }, 600);
 
       // Wenn der Kamera-Track von außen beendet wird (z.B. Anruf kommt rein,
       // eine andere App übernimmt die Kamera, Nutzer entzieht die Berechtigung
@@ -1110,6 +1182,8 @@
     liveTorchTrack = null; liveTorchOn = false; liveTorchMode = "off";
     var tb = document.getElementById("live-torch-btn");
     if (tb) { tb.classList.add("hidden"); tb.classList.remove("on"); tb.textContent = "Blitz aus"; }
+    var diag = document.getElementById("live-scan-diag");
+    if (diag) { diag.textContent = ""; diag.classList.add("hidden"); }
     document.getElementById("live-video-section").classList.add("hidden");
     if (!liveCameraBlocked) document.getElementById("live-scan-start-btn").classList.remove("hidden");
     setLiveStatusPill("Karte ruhig vor die Kamera halten", false);
@@ -1139,6 +1213,34 @@
     }
     // Dauer = jetzt an, sonst aus (Scan-Modus zündet pro Capture eigenständig)
     torchSet(next === "on");
+  }
+
+  // Setzt den Kamera-Fokus automatisch auf den Bereich wo die Kartennummer
+  // sitzt (unten links innerhalb der Guide-Box). Wird beim Start und zyklisch
+  // vor jedem Capture aufgerufen — Fokus bleibt damit auf der Nummer
+  // statt durch Continuous-AF zwischen Karten-Hintergrund und Footer zu wandern.
+  function applyNumberAreaFocus(track) {
+    if (!track || !track.applyConstraints) return Promise.resolve();
+    var caps = track.getCapabilities ? track.getCapabilities() : {};
+    var adv = {};
+    // Position des Nummern-Bereichs (passt zum gelben Fokus-Anker im UI):
+    // x ≈ 22% (links innerhalb des Karten-Rahmens), y ≈ 82% (unteres Drittel)
+    if (caps.pointsOfInterest) adv.pointsOfInterest = [{ x: 0.22, y: 0.82 }];
+    if (caps.focusMode) {
+      if (caps.focusMode.indexOf("continuous") !== -1) adv.focusMode = "continuous";
+      else if (caps.focusMode.indexOf("single-shot") !== -1) adv.focusMode = "single-shot";
+    }
+    if (caps.focusDistance) {
+      // Manche Geräte erlauben einen Nähe-Hint: leicht in Richtung Minimum
+      var min = caps.focusDistance.min, max = caps.focusDistance.max;
+      if (typeof min === "number" && typeof max === "number") {
+        adv.focusDistance = min + (max - min) * 0.15; // Richtung Makro
+      }
+    }
+    if (!Object.keys(adv).length) return Promise.resolve();
+    return track.applyConstraints({ advanced: [adv] }).catch(function(err) {
+      console.warn("[AutoFokus] nicht setzbar:", err);
+    });
   }
 
   // Tap-to-Focus: tippe ins Live-Bild, Kamera fokussiert auf diesen Punkt
@@ -1205,6 +1307,11 @@
       return runOcrOnCanvas();
     }
 
+    // Vor jedem Capture: Fokus auf den Nummern-Bereich anstoßen.
+    // Auf Android Chrome bewirkt das ein Re-Fokussieren auf diesen Punkt
+    // (statt dass der Continuous-AF z.B. die Kartenmitte erwischt).
+    applyNumberAreaFocus(liveTorchTrack);
+
     // Scan-Modus: Blitz kurz vor dem Capture an, ~180ms warten damit
     // die Belichtungs-Automatik sich auf das hellere Bild einstellt
     if (liveTorchMode === "scan") {
@@ -1213,7 +1320,8 @@
       });
       return;
     }
-    doCaptureAndOCR();
+    // Sonst: kurzer Delay damit der Fokus sich setzen kann (~120ms)
+    setTimeout(doCaptureAndOCR, 120);
   }
 
   function runOcrOnCanvas() {
@@ -1222,6 +1330,7 @@
     findCardNumber(canvas).then(function(info) {
       if (!info || !info.number) {
         setLiveStatusPill("Keine Nummer erkannt — Karte ruhig halten", false);
+        updateScanDiag(null, "Keine Nummer im Bild gefunden", "warn");
         liveBusy = false;
         return;
       }
@@ -1231,11 +1340,33 @@
         if (!blob) { liveBusy = false; return; }
         var file = new File([blob], "live-" + Date.now() + ".jpg", { type: "image/jpeg" });
         addToQueue(file, { number: info.number, setCode: info.setCode });
+        // Diagnose aus der Suche (window._lastSearchDiag) im UI anzeigen.
+        // Mit kleinem Delay, damit search erst gelaufen ist.
+        setTimeout(function() {
+          var diag = window._lastSearchDiag;
+          if (!diag) { updateScanDiag(info, "Suche läuft …", null); return; }
+          var ok = diag.matchedSet && diag.candidateCount === 1;
+          var line = "OCR: " + (info.setCode || "—") + " " + info.number +
+                     " → " + (diag.matchedSet || "kein Match") +
+                     (diag.candidateCount ? "  (" + diag.candidateCount + " Treffer)" : "");
+          var detail = diag.reason || "";
+          updateScanDiag(info, line + (detail ? "\n" + detail : ""), ok ? "ok" : "warn");
+        }, 200);
       }, "image/jpeg", 0.92);
     }).catch(function() {
       setLiveStatusPill("Karte ruhig vor die Kamera halten", false);
+      updateScanDiag(null, "OCR-Fehler", "err");
       liveBusy = false;
     });
+  }
+
+  function updateScanDiag(info, text, level) {
+    var el = document.getElementById("live-scan-diag");
+    if (!el) return;
+    el.textContent = text || "";
+    el.classList.remove("hidden", "ok", "warn", "err");
+    if (level) el.classList.add(level);
+    if (!text) el.classList.add("hidden");
   }
 
   function showLiveError(msg) {
