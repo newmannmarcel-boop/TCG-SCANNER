@@ -537,6 +537,54 @@
     ctx.putImageData(id, 0, 0); return out;
   }
 
+  // Isoliert weißen Text auf buntem Hintergrund (Epic/Showcase-Karten).
+  // Pro Pixel: brightness = min(R,G,B). Weiß = hoch in allen Kanälen,
+  // bunte Farben = mindestens ein niedriger Kanal → werden dunkel.
+  // Ausgabe: schwarzer Text auf weiß für Tesseract.
+  function isolateWhiteText(canvas) {
+    var out = document.createElement("canvas");
+    out.width = canvas.width; out.height = canvas.height;
+    var ctx = out.getContext("2d"); ctx.drawImage(canvas, 0, 0);
+    var id = ctx.getImageData(0, 0, out.width, out.height), d = id.data;
+    for (var i = 0; i < d.length; i += 4) {
+      var min = Math.min(d[i], d[i+1], d[i+2]);
+      var v = min > 150 ? 0 : 255;
+      d[i]=d[i+1]=d[i+2]=v;
+    }
+    ctx.putImageData(id, 0, 0); return out;
+  }
+
+  // Otsu-Threshold: berechnet den Schwellwert automatisch durch
+  // Maximierung der Inter-Class-Varianz im Histogramm. Robust gegen
+  // ungewöhnliche Helligkeitsverteilungen (Foils, bunte Hintergründe).
+  function otsuBinarize(canvas) {
+    var out = document.createElement("canvas");
+    out.width = canvas.width; out.height = canvas.height;
+    var ctx = out.getContext("2d"); ctx.drawImage(canvas, 0, 0);
+    var id = ctx.getImageData(0, 0, out.width, out.height), d = id.data;
+    var hist = new Uint32Array(256), total = d.length / 4;
+    for (var i = 0; i < d.length; i += 4) {
+      var g = (0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2]) | 0;
+      hist[g]++;
+    }
+    var sum = 0; for (var k = 0; k < 256; k++) sum += k * hist[k];
+    var sumB = 0, wB = 0, varMax = -1, thresh = 127;
+    for (var t = 0; t < 256; t++) {
+      wB += hist[t]; if (!wB) continue;
+      var wF = total - wB; if (!wF) break;
+      sumB += t * hist[t];
+      var mB = sumB / wB, mF = (sum - sumB) / wF;
+      var v = wB * wF * (mB - mF) * (mB - mF);
+      if (v > varMax) { varMax = v; thresh = t; }
+    }
+    for (var i = 0; i < d.length; i += 4) {
+      var g = (0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2]) | 0;
+      var v = g > thresh ? 255 : 0;
+      d[i]=d[i+1]=d[i+2]=v;
+    }
+    ctx.putImageData(id, 0, 0); return out;
+  }
+
   function adaptiveThreshold(src) {
     // Grayscale zuerst
     var gray = toGrayscale(src);
@@ -559,6 +607,36 @@
     oCtx.putImageData(oId, 0, 0); return out;
   }
 
+  // Bekannte Set-Größen aus dem Riftcodex-Cache (z.B. [219, 221, 298, ...])
+  // Wird beim ersten Aufruf einmalig berechnet und gecached.
+  var _knownSetTotals = null;
+  function getKnownSetTotals() {
+    if (_knownSetTotals) return _knownSetTotals;
+    if (!riftcodexCache || !riftcodexCache.length) return null;
+    var seen = {};
+    riftcodexCache.forEach(function(card) {
+      var s = card.number || "";
+      var rc = s.match(/^[a-z]+-\d+[a-z]?-(\d+)$/i);
+      if (rc) { seen[parseInt(rc[1], 10)] = true; return; }
+      var std = s.match(/^\d+\*?\/(\d+)/);
+      if (std) { seen[parseInt(std[1], 10)] = true; }
+    });
+    _knownSetTotals = Object.keys(seen).map(Number).sort(function(a,b){return a-b;});
+    return _knownSetTotals;
+  }
+
+  // Plausibilitätsprüfung: Müll-Treffer wie "1/51" aus Karten-Artwork
+  // oder Rarity-Sternen frühzeitig verwerfen.
+  function isPlausibleCardNumber(num, total) {
+    if (total < 100 || num < 1 || num > total) return false;
+    var known = getKnownSetTotals();
+    if (known && known.length) {
+      var nearKnown = known.some(function(t) { return Math.abs(t - total) <= 10; });
+      if (!nearKnown) return false;
+    }
+    return true;
+  }
+
   // Extrahiert einen Set-Code (3 Großbuchstaben) aus einem Text
   // Bevorzugt Codes die direkt vor einer Zahl stehen ("OGN 165/298")
   function extractSetCode(text) {
@@ -571,14 +649,21 @@
 
   // Parst Kartennummer UND Set-Code (z.B. "OGN", "SFD") aus OCR-Text
   // → { number: "165/298", setCode: "OGN" } oder null wenn keine Nummer gefunden
+  // Probiert ALLE Nummern-Treffer im Text durch — nimmt den ersten plausiblen.
+  // So wird "Stern 1/5 ... Nummer 165/298" nicht mehr als "1/5" missgelesen.
   function parseCardInfo(text) {
     var raw = text || "";
     var setCode = extractSetCode(raw);
     var t = raw.replace(/\s+/g, "")
       .replace(/[oO]/g, "0").replace(/[lLI|]/g, "1").replace(/[bB]/g, "6");
-    var m = t.match(/(\d{1,4})[*xX]?\/(\d{1,4})/);
-    if (!m) return null;
-    return { number: m[1] + "/" + m[2], setCode: setCode };
+    var re = /(\d{1,4})[*xX]?\/(\d{1,4})/g, m;
+    while ((m = re.exec(t)) !== null) {
+      var num = parseInt(m[1], 10), tot = parseInt(m[2], 10);
+      if (isPlausibleCardNumber(num, tot)) {
+        return { number: m[1] + "/" + m[2], setCode: setCode };
+      }
+    }
+    return null;
   }
   // Rückwärtskompatibler Wrapper
   function parseCardNumber(text) {
@@ -646,12 +731,16 @@
     function lo20()   { return _lo20 || (_lo20 = cropAndScale(canvas, 0, Math.floor(H * 0.78), W, Math.floor(H * 0.20), scBase)); }
     function lo50()   { return _lo50 || (_lo50 = cropAndScale(canvas, 0, Math.floor(H * 0.50), W, Math.floor(H * 0.48), scBase)); }
 
-    // 5 Versuche — zuerst der kleine zielgerichtete Crop (super schnell),
-    // dann wachsende Fallbacks falls die Karte nicht perfekt im Frame liegt
+    // Mehr Versuche aber alle auf kleinen Crops → bleibt schnell.
+    // Reihenfolge: Common/Uncommon (einfache Karten) zuerst, dann Spezial-
+    // Preprocessings für Epic/Showcase mit buntem Hintergrund.
     var attempts = [
       { make: function() { return toGrayscale(nbCrop()); },       psm: "7" },
       { make: function() { return binarize(nbCrop(), true);  },   psm: "7" }, // helle Schrift auf dunklem Footer
+      { make: function() { return isolateWhiteText(nbCrop()); },  psm: "7" }, // weißer Text auf buntem Bg (Epic/Showcase)
+      { make: function() { return otsuBinarize(nbCrop()); },      psm: "7" }, // auto-Threshold für schwierige Kontraste
       { make: function() { return adaptiveThreshold(nbCrop()); }, psm: "7" },
+      { make: function() { return isolateWhiteText(lo20()); },    psm: "7" }, // breiterer Crop falls Karte verschoben
       { make: function() { return toGrayscale(lo20()); },         psm: "7" },
       { make: function() { return toGrayscale(lo50()); },         psm: "11" }
     ];
