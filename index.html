@@ -1735,8 +1735,11 @@
   //   ≥ 0.78 → sehr ähnlich, fast sicher dieselbe Karte → sofort bestätigen
   //   ≥ 0.65 → ähnlich, wahrscheinlich dieselbe → 2-Frame-Konsens
   //   <  0.65 → nicht klar → OCR-Fallback
-  var EMB_MATCH_STRONG = 0.78;
-  var EMB_MATCH_MEDIUM = 0.65;
+  // Schwellen vorerst niedriger — wir brauchen reale Similarity-Werte vom User
+  // um sie sinnvoll zu kalibrieren. Diagnose-Log in der Konsole zeigt die
+  // tatsächlichen Werte für jeden Scan.
+  var EMB_MATCH_STRONG = 0.55;
+  var EMB_MATCH_MEDIUM = 0.40;
 
   // Konsens-Buffer für Embedding-Matches (analog zum OCR-Buffer)
   var liveRecentImgMatches = [];
@@ -1750,13 +1753,29 @@
         var cardCrop = cropGuideBoxArea(canvas);
         return extractEmbedding(cardCrop).then(function(queryEmb) {
           var match = findBestEmbeddingMatch(queryEmb);
+          // Diagnose: zeige IMMER die Top-3 ähnlichsten Karten + beste Similarity
+          // damit User Daten zum Justieren liefern kann
+          if (match && match.candidates && match.candidates.length > 0) {
+            var top = match.candidates.slice(0, 3).map(function(c) {
+              return (c.card.set || "?") + " " + (c.card.name || c.card.number || "?") +
+                     " (" + c.similarity.toFixed(2) + ")";
+            }).join("\n  ");
+            console.log("[Embed-Match] Beste:", match.bestSimilarity.toFixed(3),
+                        "Kandidaten:", match.candidates.length,
+                        "Top-3:\n  " + top);
+          }
           if (match && match.card && match.similarity >= EMB_MATCH_MEDIUM) {
             return handleEmbeddingMatch(canvas, match);
           }
-          // schwacher Match → OCR als Fallback
+          // schwacher Match → OCR als Fallback. Zeige trotzdem was die
+          // Bilderkennung gefunden hätte (auch wenn unsicher)
           if (match) {
+            var topText = match.candidates.slice(0, 3).map(function(c) {
+              return "  " + (c.card.name || c.card.number || "?") + " (" + c.similarity.toFixed(2) + ")";
+            }).join("\n");
             updateScanDiag(null,
-              "Kein klarer Bild-Match (beste Similarity " + match.similarity.toFixed(2) + "). OCR-Fallback läuft …",
+              "Kein klarer Bild-Match. Beste Similarity: " + match.similarity.toFixed(2) + " — Top-3:\n" + topText +
+              "\nOCR-Fallback läuft …",
               "warn");
           }
           return runOcrOnCanvas();
