@@ -1,0 +1,12 @@
+# Build-Tools (Node.js Pakete) — werden lokal neu installiert via npm install
+build-tools/node_modules/
+build-tools/package-lock.json
+
+# OS / Editor Müll
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Browser-Cache Dateien falls jemand mal welche speichert
+*.log
