@@ -593,12 +593,34 @@
     return hashDbBuildPromise;
   }
 
+  // Versucht eine vorberechnete Hash-DB als statische Datei zu laden
+  // (im Repo mitgeliefert). Wenn vorhanden: kein Download von 1064 Bildern
+  // mehr nötig — Karten sind sofort scanbar.
+  function loadPrebuiltHashDb() {
+    return fetch("./riftbound-hashes.json", { cache: "force-cache" })
+      .then(function(r) {
+        if (!r.ok) throw new Error("kein Prebuilt");
+        return r.json();
+      })
+      .then(function(parsed) {
+        if (parsed && parsed.hashes && parsed.cardIds &&
+            parsed.hashes.length === parsed.cardIds.length &&
+            parsed.hashes.length > 0) {
+          console.log("[Hash-DB] Prebuilt geladen:", parsed.hashes.length, "Karten");
+          return parsed;
+        }
+        throw new Error("Prebuilt ungültig");
+      })
+      .catch(function() { return null; });
+  }
+
   function ensureHashDb(onProgress) {
     if (hashDb && hashDb.hashes.length > 0) return Promise.resolve(hashDb);
+
+    // 1) localStorage — falls schon vorher gebaut oder geladen
     var fromStorage = loadHashDbFromStorage();
-    if (fromStorage) {
+    if (fromStorage && fromStorage.hashes.length > 0) {
       hashDb = fromStorage;
-      // Falls weniger Hashes als Cache-Karten → Resume im Hintergrund
       return loadRiftcodexCache().then(function(cache) {
         var withImg = cache.filter(function(c) { return c.imageUrl && c.riftcodexId; });
         if (fromStorage.cardIds.length < withImg.length) {
@@ -607,8 +629,37 @@
         return hashDb;
       });
     }
-    return buildHashDatabase(onProgress);
+
+    // 2) Statische Datei im Repo — schnellste Option, kein Download nötig
+    return loadPrebuiltHashDb().then(function(prebuilt) {
+      if (prebuilt) {
+        hashDb = prebuilt;
+        saveHashDbToStorage(prebuilt);
+        return hashDb;
+      }
+      // 3) Fallback: aus Karten-Bildern selbst bauen (langsam)
+      return buildHashDatabase(onProgress);
+    });
   }
+
+  // Dev-Werkzeug: lädt die aktuell gebaute Hash-DB als JSON-Datei runter.
+  // In der Konsole aufrufen: exportHashDb()
+  // Resultat (riftbound-hashes.json) ins Repo neben index.html legen.
+  function exportHashDb() {
+    if (!hashDb || !hashDb.hashes.length) {
+      console.warn("[Export] Hash-DB ist leer, erst aufbauen lassen");
+      return;
+    }
+    var json = JSON.stringify(hashDb);
+    var blob = new Blob([json], { type: "application/json" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "riftbound-hashes.json";
+    document.body.appendChild(a); a.click(); a.remove();
+    console.log("[Export] riftbound-hashes.json (" + hashDb.hashes.length + " Karten, " +
+                Math.round(json.length / 1024) + " KB)");
+  }
+  window.exportHashDb = exportHashDb; // global verfügbar machen
 
   // Sucht die beste Match-Karte zum Hash. Liefert { card, distance }
   function findBestImageMatch(queryHash) {
