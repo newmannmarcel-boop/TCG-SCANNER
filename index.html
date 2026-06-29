@@ -701,18 +701,20 @@
     var all = embedDb.embeddings;
     var N = embedDb.cardIds.length;
     var hubCount = embedDb._hubCount;
-    var maxHub = embedDb._maxHubCount || 1;
-    var sims = new Float32Array(N);     // raw cosine
-    var adjSims = new Float32Array(N);  // mit Hubness-Penalty
+    var sims = new Float32Array(N);
+    var adjSims = new Float32Array(N);
     var bestAdj = -Infinity, secondBestAdj = -Infinity, bestIdx = -1;
     for (var i = 0; i < N; i++) {
       var s = 0, off = i * dim;
       for (var j = 0; j < dim; j++) s += queryEmb[j] * all[off + j];
       sims[i] = s;
-      // Penalty: Hub-Karten kriegen bis zu HUB_ALPHA Similarity abgezogen.
-      // Normale Karten (hubCount ≈ K=5 oder weniger) praktisch keine Penalty.
-      var penalty = hubCount ? HUB_ALPHA * (hubCount[i] / maxHub) : 0;
-      var adj = s - penalty;
+      // Kombinierte Penalty: statische (Hubness im Referenz-Raum) +
+      // session-basierte (Karte gewinnt seit Beginn der Session zu oft).
+      // Beide gemeinsam machen es nahezu unmöglich für Magnet-Karten
+      // sich durch falsche Treffer durchzuschleichen.
+      var staticPen = getStaticHubPenalty(i);
+      var sessionPen = getSessionHubPenalty(embedDb.cardIds[i]);
+      var adj = s - staticPen - sessionPen;
       adjSims[i] = adj;
       if (adj > bestAdj) { secondBestAdj = bestAdj; bestAdj = adj; bestIdx = i; }
       else if (adj > secondBestAdj) { secondBestAdj = adj; }
@@ -721,6 +723,9 @@
 
     var bestRawSim = sims[bestIdx];
     var hubOfBest = hubCount ? hubCount[bestIdx] : 0;
+    var hubRankOfBest = (embedDb._hubRank) ? embedDb._hubRank[bestIdx] : -1;
+    var staticPenOfBest = getStaticHubPenalty(bestIdx);
+    var sessionPenOfBest = getSessionHubPenalty(embedDb.cardIds[bestIdx]);
 
     // Tie-Band sehr eng auf ADJUSTED Sim — fängt nur echte Duplikate
     var tieBand = 0.0005;
@@ -738,14 +743,17 @@
     }
     tiePool.sort(function(a, b) { return b.adjustedSimilarity - a.adjustedSimilarity; });
 
-    var margin = bestAdj - secondBestAdj; // auf ADJUSTED Sim
+    var margin = bestAdj - secondBestAdj;
     return {
       candidates: tiePool,
-      bestSimilarity: bestAdj,            // adjusted → wird für Threshold genutzt
-      rawBestSimilarity: bestRawSim,      // diagnostisch
+      bestSimilarity: bestAdj,
+      rawBestSimilarity: bestRawSim,
       secondBestSimilarity: secondBestAdj,
       margin: margin,
       hubCountOfBest: hubOfBest,
+      hubRankOfBest: hubRankOfBest,
+      staticPenaltyOfBest: staticPenOfBest,
+      sessionPenaltyOfBest: sessionPenOfBest,
       card: tiePool[0].card,
       similarity: bestAdj
     };
@@ -999,15 +1007,74 @@
       for (var k = 0; k < topK; k++) if (topIdx[k] >= 0) hubCount[topIdx[k]]++;
     }
 
-    // Maximum für Normalisierung finden
+    // Maximum für Normalisierung + Rang-Berechnung für Perzentil-Penalty
     var maxHub = 0;
     for (var i = 0; i < n; i++) if (hubCount[i] > maxHub) maxHub = hubCount[i];
 
+    // Sortiere Indices nach hubCount absteigend → Rang
+    var sortedIdx = new Int32Array(n);
+    for (var i = 0; i < n; i++) sortedIdx[i] = i;
+    // Sortier-Funktion: höhere hubCount zuerst, bei Gleichstand niedrigerer Index zuerst (stabil)
+    Array.prototype.sort.call(sortedIdx, function(a, b) {
+      var d = hubCount[b] - hubCount[a];
+      return d !== 0 ? d : a - b;
+    });
+    var hubRank = new Int32Array(n);
+    for (var r = 0; r < n; r++) hubRank[sortedIdx[r]] = r;
+
     db._hubCount = hubCount;
     db._maxHubCount = maxHub;
+    db._hubRank = hubRank;
     var dt = Math.round(performance.now() - t0);
-    console.log("[Hubness] berechnet in " + dt + "ms — max hubCount=" + maxHub +
-                " (Karten erwartet K=" + topK + ", Mittelwert=" + topK + ")");
+    // Diagnostik: Top-5 Hubs anzeigen damit User sieht ob Vault Breaker erwischt wurde
+    var topHubs = [];
+    for (var r = 0; r < Math.min(5, n); r++) {
+      var idx = sortedIdx[r];
+      var card = (riftcodexCache || []).filter(function(c) { return c.riftcodexId === db.cardIds[idx]; })[0];
+      topHubs.push((card ? card.name : "?") + " (count " + hubCount[idx] + ")");
+    }
+    console.log("[Hubness] berechnet in " + dt + "ms — max=" + maxHub +
+                ", Top-5 Hubs: " + topHubs.join(", "));
+  }
+
+  // Statische Hub-Penalty mit Perzentil-Kurve.
+  // Nur die top 25% der Hubs bekommen Penalty, mit progressivem Verlauf:
+  //   Top 5% (extreme Hubs): voller HUB_ALPHA Penalty
+  //   Top 10%: ~85%
+  //   Top 20%: ~30%
+  //   Below top 25%: 0
+  // Damit kriegen ECHTE Hubs (Vault Breaker etc.) harten Abzug, normale
+  // Karten praktisch keinen.
+  function getStaticHubPenalty(cardIdx) {
+    if (!embedDb || !embedDb._hubRank) return 0;
+    var rank = embedDb._hubRank[cardIdx];
+    var n = embedDb.cardIds.length;
+    var percentile = rank / n; // 0 = #1 hub, 1 = least hubby
+    if (percentile >= 0.25) return 0;
+    var t = 1 - (percentile / 0.25); // 1 (top hub) → 0 (am Rand der top 25%)
+    // pow(t, 1.5) = super-linear → top hub kriegt deutlich härtere Strafe
+    return HUB_ALPHA * Math.pow(t, 1.5);
+  }
+
+  // Session-basierte Hub-Erkennung — adaptive Magnet-Bekämpfung
+  var liveWinHistory = []; // recent winning cardIds
+  var WIN_HISTORY_MAX = 30;
+
+  function recordEmbeddingWin(cardId) {
+    if (!cardId) return;
+    liveWinHistory.unshift(cardId);
+    if (liveWinHistory.length > WIN_HISTORY_MAX) liveWinHistory.length = WIN_HISTORY_MAX;
+  }
+
+  function getSessionHubPenalty(cardId) {
+    if (!cardId) return 0;
+    var count = 0;
+    for (var i = 0; i < liveWinHistory.length; i++) {
+      if (liveWinHistory[i] === cardId) count++;
+    }
+    if (count < SESSION_HUB_THRESHOLD) return 0;
+    var excess = count - SESSION_HUB_THRESHOLD + 1;
+    return Math.min(SESSION_HUB_MAX, excess * SESSION_HUB_INCREMENT);
   }
 
   // Embedding-DB aus statischer JSON-Datei laden (im Repo mitgeliefert).
@@ -2017,6 +2084,7 @@
     liveTorchTrack = null; liveTorchOn = false; liveTorchMode = "off";
     liveRecentReads = [];
     liveRecentImgMatches = [];
+    liveWinHistory = []; // Session-Hub-Penalty bei Stop zurücksetzen
     var tb = document.getElementById("live-torch-btn");
     if (tb) { tb.classList.add("hidden"); tb.classList.remove("on"); tb.textContent = "Blitz aus"; }
     var diag = document.getElementById("live-scan-diag");
@@ -2161,17 +2229,21 @@
   //   ≥ 0.65 → ähnlich, wahrscheinlich dieselbe → 2-Frame-Konsens
   //   <  0.65 → nicht klar → OCR-Fallback
   // Schwellen für ZENTRIERTEN + HUBNESS-ADJUSTED Embedding-Raum.
-  // Beobachtung Blood Rush: rawSim 0.34, Margin 0.045-0.090 → korrekt erkannt.
-  // Beobachtung Vault Breaker: Hub-Karte, gewann oft mit ähnlichen Werten.
-  // Mit Hubness-Penalty bekommt Vault Breaker ~HUB_ALPHA Abzug, andere
-  // (z.B. Blood Rush) nur einen Bruchteil → Margins werden klarer.
-  var EMB_MATCH_STRONG = 0.30;        // adj-sim: leicht runter wegen Penalty
-  var EMB_MATCH_MEDIUM = 0.18;
-  var EMB_MIN_MARGIN_STRONG = 0.04;   // Blood Rush margin 0.045 passt
-  var EMB_MIN_MARGIN_MEDIUM = 0.025;
-  // Anti-Hub-Multiplikator: max Penalty die eine Magnet-Karte abkriegt.
-  // 0.15 = Vault Breaker (höchste hub-count) verliert 0.15 vs nicht-magnetischen Konkurrent.
-  var HUB_ALPHA = 0.15;
+  // User-Feedback Iteration 2: Vault Breaker rutscht trotz Penalty
+  // 0.15 durch (rawSim 0.38-0.40, adjSim 0.30-0.35 → bestätigt fälschlich).
+  // Lösung: aggressiverer Hub-Filter + höhere Schwelle.
+  var EMB_MATCH_STRONG = 0.35;        // RAUF von 0.30 — Vault Breaker dropt drunter
+  var EMB_MATCH_MEDIUM = 0.22;
+  var EMB_MIN_MARGIN_STRONG = 0.05;
+  var EMB_MIN_MARGIN_MEDIUM = 0.03;
+  // Maximale Hub-Penalty — auf Top-Hubs deutlich erhöht.
+  var HUB_ALPHA = 0.30;
+  // Session-Penalty: wenn eine Karte mehr als N mal in Folge "gewinnt",
+  // bekommt sie zusätzliche Penalty. Adaptive Magnet-Bekämpfung —
+  // sollte ein noch nicht erfasster Hub auftauchen, lernt das System.
+  var SESSION_HUB_THRESHOLD = 3;
+  var SESSION_HUB_INCREMENT = 0.06;
+  var SESSION_HUB_MAX = 0.40;
 
   // Konsens-Buffer für Embedding-Matches (analog zum OCR-Buffer)
   var liveRecentImgMatches = [];
@@ -2252,11 +2324,14 @@
               return (c.card.set || "?") + " " + (c.card.name || c.card.number || "?") +
                      " (raw " + c.similarity.toFixed(3) + " adj " + (c.adjustedSimilarity || c.similarity).toFixed(3) + ")";
             }).join("\n  ");
-            console.log("[Embed-Match] Crop=" + match.cropUsed,
-                        "adjSim=" + match.bestSimilarity.toFixed(3),
-                        "rawSim=" + (match.rawBestSimilarity || 0).toFixed(3),
-                        "margin=" + (match.margin || 0).toFixed(3),
-                        "hubCount(best)=" + (match.hubCountOfBest || 0),
+            console.log("[Embed-Match] Crop=" + match.cropUsed +
+                        " rawSim=" + (match.rawBestSimilarity || 0).toFixed(3) +
+                        " adjSim=" + match.bestSimilarity.toFixed(3) +
+                        " margin=" + (match.margin || 0).toFixed(3) +
+                        " hub(count=" + (match.hubCountOfBest || 0) +
+                        ", rank=" + (match.hubRankOfBest != null ? match.hubRankOfBest : "?") +
+                        ") penalty(static=" + (match.staticPenaltyOfBest || 0).toFixed(3) +
+                        ", session=" + (match.sessionPenaltyOfBest || 0).toFixed(3) + ")" +
                         "\nTop-3:\n  " + top);
           }
           // Ein klarer Treffer braucht ZWEI Bedingungen: hohe Similarity
@@ -2313,6 +2388,7 @@
     // Strong = hohe Similarity UND deutlicher Margin → sofort bestätigen
     if (match.isStrong) {
       liveRecentImgMatches = [];
+      recordEmbeddingWin(lead.riftcodexId); // für adaptive Magnet-Bekämpfung
       setLiveStatusPill("Erkannt: " + label, true);
       updateScanDiag(null,
         "Bild-Match: " + label + "  (Sim " + sim.toFixed(3) + ", Margin " + margin.toFixed(3) + ", sicher)",
@@ -2330,6 +2406,7 @@
     liveRecentImgMatches.forEach(function(r) { counts[r.clusterKey] = (counts[r.clusterKey] || 0) + 1; });
     if (counts[clusterKey] >= 2) {
       liveRecentImgMatches = [];
+      recordEmbeddingWin(lead.riftcodexId);
       setLiveStatusPill("Bestätigt: " + label, true);
       updateScanDiag(null,
         "Bild-Match bestätigt: " + label + "  (Sim " + sim.toFixed(3) + ", Margin " + margin.toFixed(3) + ", 2× gesehen)",
