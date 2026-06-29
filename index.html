@@ -192,16 +192,6 @@
   .live-scan-diag.warn { border-color: #4A3A1A; color: #D4B49A; }
   .live-scan-diag.err  { border-color: #4A2E1E; color: #D4A49A; }
   .live-scan-diag.hidden { display: none; }
-  .hash-build-banner {
-    background: #1A1710; border: 1px solid #3A2E1E; border-radius: 12px;
-    padding: 14px 16px; margin-bottom: 18px;
-  }
-  .hash-build-banner.hidden { display: none; }
-  .hbb-title { color: #C9A24B; font-size: 13px; font-weight: 700; margin-bottom: 10px; letter-spacing: 0.3px; }
-  .hbb-progress { background: #0E0C08; border-radius: 6px; height: 8px; overflow: hidden; margin-bottom: 6px; }
-  .hbb-bar { background: linear-gradient(90deg,#8A6E1F,#C9A24B); height: 100%; width: 0%; transition: width 0.25s ease; }
-  .hbb-status { color: #C9A24B; font-size: 11px; font-weight: 600; margin-bottom: 8px; font-variant-numeric: tabular-nums; }
-  .hbb-hint { color: #8A8270; font-size: 11px; line-height: 1.45; }
   .live-frame-guide {
     /* TCG-Karte 63×88mm = 1.4:1 — Im 3:4-Container: Breite 72% → Höhe ≈ 76% → AR=1.41 */
     position: absolute; top: 12%; left: 14%; right: 14%; bottom: 12%;
@@ -296,12 +286,6 @@
 </header>
 
 <main id="view-scan">
-  <div id="hash-build-banner" class="hash-build-banner hidden">
-    <div class="hbb-title">Karten-Datenbank wird vorbereitet</div>
-    <div class="hbb-progress"><div class="hbb-bar" id="hbb-bar"></div></div>
-    <div class="hbb-status" id="hbb-status">0 / 0</div>
-    <div class="hbb-hint">Einmaliger Vorgang. Du kannst weiter scannen — OCR übernimmt solange. Sobald fertig, erkennt der Scanner Karten direkt am Bild (deutlich schneller und genauer).</div>
-  </div>
   <div style="margin-bottom: 16px;">
     <div class="section-label">Scan-Modus</div>
     <div class="mode-row" id="foil-mode-row">
@@ -440,254 +424,7 @@
   var riftcodexCachePromise = null;
   var STORAGE_KEY_RCACHE = "kartenkammer_riftcodex_v4";
 
-  // Bilderkennung via perceptual hashing (dHash)
-  // hashDb = { hashes: [[lo,hi], ...], cardIds: [riftcodexId, ...] }
-  var STORAGE_KEY_HASHES = "kartenkammer_riftbound_hashes_v1";
-  var hashDb = null;
-  var hashDbBuildPromise = null;
-
   var _ocrWorker = null; // Tesseract-Worker (wird beim ersten Scan geladen)
-
-  // ============================================================
-  // BILDERKENNUNG (perceptual hashing) — Hauptweg seit v5
-  // ============================================================
-  // Statt OCR auf winzige Kartennummern lesen wir das Karten-Artwork
-  // als Ganzes. Vorgehensweise wie bei Cardexus & Co.:
-  //   1. Einmalig: alle ~1064 Riftbound-Karten-Bilder runterladen,
-  //      dHash berechnen, in localStorage speichern
-  //   2. Pro Scan: Live-Frame → dHash → schnellste Hamming-Distanz
-  //      → beste Karte
-  // dHash 64-bit ist robust gegen kleine Verschiebungen, Beleuchtung,
-  // leichte Verzerrung. Vergleich: ~1ms für 1064 Karten.
-
-  function computeDHash(srcCanvasOrImg) {
-    var c = document.createElement("canvas");
-    c.width = 9; c.height = 8; // 9×8 → 8 Spalten×8 Zeilen Vergleiche = 64 bit
-    var ctx = c.getContext("2d");
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
-    try {
-      ctx.drawImage(srcCanvasOrImg, 0, 0, 9, 8);
-    } catch (e) {
-      return null; // CORS oder ungeladenes Bild
-    }
-    var data;
-    try { data = ctx.getImageData(0, 0, 9, 8).data; }
-    catch (e) { return null; } // CORS taint
-    var lo = 0 >>> 0, hi = 0 >>> 0;
-    for (var y = 0; y < 8; y++) {
-      for (var x = 0; x < 8; x++) {
-        var i  = (y * 9 + x) * 4;
-        var i2 = (y * 9 + x + 1) * 4;
-        var g1 = (0.299*data[i]  + 0.587*data[i+1]  + 0.114*data[i+2])  | 0;
-        var g2 = (0.299*data[i2] + 0.587*data[i2+1] + 0.114*data[i2+2]) | 0;
-        var bit = g1 < g2 ? 1 : 0;
-        var pos = y * 8 + x;
-        if (pos < 32) lo = (lo | (bit << pos)) >>> 0;
-        else          hi = (hi | (bit << (pos - 32))) >>> 0;
-      }
-    }
-    return [lo, hi];
-  }
-
-  function popcount32(n) {
-    n = n - ((n >>> 1) & 0x55555555);
-    n = (n & 0x33333333) + ((n >>> 2) & 0x33333333);
-    return ((((n + (n >>> 4)) & 0x0F0F0F0F) * 0x01010101) >>> 24);
-  }
-  function hamming64(a, b) {
-    return popcount32((a[0] ^ b[0]) >>> 0) + popcount32((a[1] ^ b[1]) >>> 0);
-  }
-
-  // Lädt ein Karten-Bild und berechnet dessen dHash
-  function fetchAndHashCard(url) {
-    return new Promise(function(resolve) {
-      var img = new Image();
-      img.crossOrigin = "anonymous";
-      var done = false;
-      img.onload = function() { if (done) return; done = true; resolve(computeDHash(img)); };
-      img.onerror = function() { if (done) return; done = true; resolve(null); };
-      // Timeout 10s — manche Bilder hängen
-      setTimeout(function() { if (done) return; done = true; resolve(null); }, 10000);
-      img.src = url;
-    });
-  }
-
-  // Hash-Datenbank aus localStorage laden, falls vorhanden
-  function loadHashDbFromStorage() {
-    try {
-      var raw = localStorage.getItem(STORAGE_KEY_HASHES);
-      if (!raw) return null;
-      var parsed = JSON.parse(raw);
-      if (parsed && parsed.hashes && parsed.cardIds &&
-          parsed.hashes.length === parsed.cardIds.length &&
-          parsed.hashes.length > 0) {
-        return parsed;
-      }
-    } catch (e) {}
-    return null;
-  }
-
-  function saveHashDbToStorage(db) {
-    try { localStorage.setItem(STORAGE_KEY_HASHES, JSON.stringify(db)); }
-    catch (e) { console.warn("[Hash-DB] Speichern fehlgeschlagen:", e); }
-  }
-
-  // Baut die Hash-DB komplett auf. onProgress(done, total) wird häufig
-  // aufgerufen damit das UI Fortschritt zeigen kann.
-  function buildHashDatabase(onProgress) {
-    if (hashDbBuildPromise) return hashDbBuildPromise;
-    hashDbBuildPromise = loadRiftcodexCache().then(function(cache) {
-      var withImg = cache.filter(function(c) { return c.imageUrl && c.riftcodexId; });
-      var total = withImg.length;
-      if (!total) return { hashes: [], cardIds: [] };
-
-      // Bestehende DB als Basis nehmen (für Resume nach Crash)
-      var existing = loadHashDbFromStorage() || { hashes: [], cardIds: [] };
-      var existingIds = {};
-      existing.cardIds.forEach(function(id, idx) { existingIds[id] = idx; });
-
-      var hashes = existing.hashes.slice();
-      var cardIds = existing.cardIds.slice();
-      var doneCount = cardIds.length;
-      if (onProgress) onProgress(doneCount, total);
-
-      // In Batches verarbeiten — 4 parallel, dann nächster Batch
-      var BATCH = 4;
-      function nextBatch(idx) {
-        if (idx >= withImg.length) return { hashes: hashes, cardIds: cardIds };
-        var batch = [];
-        for (var k = 0; k < BATCH && (idx + k) < withImg.length; k++) {
-          var card = withImg[idx + k];
-          if (existingIds.hasOwnProperty(card.riftcodexId)) {
-            batch.push(Promise.resolve(null)); // schon vorhanden
-          } else {
-            batch.push(fetchAndHashCard(card.imageUrl).then(function(h) {
-              return h ? { id: card.riftcodexId, hash: h } : null;
-            }.bind(null, card)));
-          }
-        }
-        return Promise.all(batch).then(function(results) {
-          results.forEach(function(r) {
-            if (r && !existingIds.hasOwnProperty(r.id)) {
-              hashes.push(r.hash);
-              cardIds.push(r.id);
-              existingIds[r.id] = true;
-            }
-          });
-          doneCount = Math.min(idx + BATCH, withImg.length);
-          if (onProgress) onProgress(doneCount, total);
-          // Alle 40 Karten zwischenspeichern
-          if (doneCount % 40 < BATCH) {
-            saveHashDbToStorage({ hashes: hashes, cardIds: cardIds });
-          }
-          return nextBatch(idx + BATCH);
-        });
-      }
-      return nextBatch(0).then(function(db) {
-        saveHashDbToStorage(db);
-        hashDb = db;
-        return db;
-      });
-    });
-    return hashDbBuildPromise;
-  }
-
-  // Versucht eine vorberechnete Hash-DB als statische Datei zu laden
-  // (im Repo mitgeliefert). Wenn vorhanden: kein Download von 1064 Bildern
-  // mehr nötig — Karten sind sofort scanbar.
-  function loadPrebuiltHashDb() {
-    return fetch("./riftbound-hashes.json", { cache: "force-cache" })
-      .then(function(r) {
-        if (!r.ok) throw new Error("kein Prebuilt");
-        return r.json();
-      })
-      .then(function(parsed) {
-        if (parsed && parsed.hashes && parsed.cardIds &&
-            parsed.hashes.length === parsed.cardIds.length &&
-            parsed.hashes.length > 0) {
-          console.log("[Hash-DB] Prebuilt geladen:", parsed.hashes.length, "Karten");
-          return parsed;
-        }
-        throw new Error("Prebuilt ungültig");
-      })
-      .catch(function() { return null; });
-  }
-
-  function ensureHashDb(onProgress) {
-    if (hashDb && hashDb.hashes.length > 0) return Promise.resolve(hashDb);
-
-    // 1) localStorage — falls schon vorher gebaut oder geladen
-    var fromStorage = loadHashDbFromStorage();
-    if (fromStorage && fromStorage.hashes.length > 0) {
-      hashDb = fromStorage;
-      return loadRiftcodexCache().then(function(cache) {
-        var withImg = cache.filter(function(c) { return c.imageUrl && c.riftcodexId; });
-        if (fromStorage.cardIds.length < withImg.length) {
-          buildHashDatabase(onProgress);
-        }
-        return hashDb;
-      });
-    }
-
-    // 2) Statische Datei im Repo — schnellste Option, kein Download nötig
-    return loadPrebuiltHashDb().then(function(prebuilt) {
-      if (prebuilt) {
-        hashDb = prebuilt;
-        saveHashDbToStorage(prebuilt);
-        return hashDb;
-      }
-      // 3) Fallback: aus Karten-Bildern selbst bauen (langsam)
-      return buildHashDatabase(onProgress);
-    });
-  }
-
-  // Dev-Werkzeug: lädt die aktuell gebaute Hash-DB als JSON-Datei runter.
-  // In der Konsole aufrufen: exportHashDb()
-  // Resultat (riftbound-hashes.json) ins Repo neben index.html legen.
-  function exportHashDb() {
-    if (!hashDb || !hashDb.hashes.length) {
-      console.warn("[Export] Hash-DB ist leer, erst aufbauen lassen");
-      return;
-    }
-    var json = JSON.stringify(hashDb);
-    var blob = new Blob([json], { type: "application/json" });
-    var a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "riftbound-hashes.json";
-    document.body.appendChild(a); a.click(); a.remove();
-    console.log("[Export] riftbound-hashes.json (" + hashDb.hashes.length + " Karten, " +
-                Math.round(json.length / 1024) + " KB)");
-  }
-  window.exportHashDb = exportHashDb; // global verfügbar machen
-
-  // Sucht die beste Match-Karte zum Hash. Liefert { card, distance }
-  function findBestImageMatch(queryHash) {
-    if (!hashDb || !queryHash) return null;
-    var bestDist = Infinity, bestIdx = -1;
-    var hs = hashDb.hashes;
-    for (var i = 0; i < hs.length; i++) {
-      var d = hamming64(queryHash, hs[i]);
-      if (d < bestDist) { bestDist = d; bestIdx = i; if (d === 0) break; }
-    }
-    if (bestIdx < 0) return null;
-    var cardId = hashDb.cardIds[bestIdx];
-    var card = (riftcodexCache || []).filter(function(c) { return c.riftcodexId === cardId; })[0];
-    return { card: card, distance: bestDist };
-  }
-
-  // Schneidet aus dem Live-Frame den Bereich der Guide-Box aus (= die Karte)
-  // und liefert den Crop als Canvas für die Hash-Berechnung
-  function cropGuideBoxArea(canvas) {
-    var W = canvas.width, H = canvas.height;
-    // Guide: left:14%, right:14%, top:12%, bottom:12% (siehe CSS .live-frame-guide)
-    var x = Math.floor(W * 0.14), y = Math.floor(H * 0.12);
-    var w = Math.floor(W * 0.72), h = Math.floor(H * 0.76);
-    var out = document.createElement("canvas");
-    out.width = w; out.height = h;
-    out.getContext("2d").drawImage(canvas, x, y, w, h, 0, 0, w, h);
-    return out;
-  }
 
   function uid() {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -1316,13 +1053,9 @@
 
     resultPromise.then(function (result) {
       var foilValue = foilMode === "foilOnly" ? true : foilMode === "nonFoilOnly" ? false : false;
-      // Wenn Bilderkennung schon eine konkrete Karte geliefert hat → direkt nehmen,
-      // keine Nummern-Suche mehr nötig
-      var candidatesPromise = result.matchedCard
-        ? Promise.resolve([result.matchedCard])
-        : result.number
-          ? searchRiftboundByNumber(result.number, result.setCode).catch(function () { return []; })
-          : Promise.resolve([]);
+      var candidatesPromise = result.number
+        ? searchRiftboundByNumber(result.number, result.setCode).catch(function () { return []; })
+        : Promise.resolve([]);
 
       return candidatesPromise.then(function (candidates) {
         var entry = queue.filter(function (e) { return e.id === entryId; })[0];
@@ -1709,30 +1442,8 @@
     doCaptureAndOCR();
   }
 
-  // Image-Match Schwellen (Hamming-Distanz auf 64-bit dHash)
-  // Erfahrungswerte: gleiche Karte ≈ 0-8, ähnliche Karte ≈ 10-20, andere ≈ 25+
-  var IMG_MATCH_STRONG = 8;   // sofort bestätigen
-  var IMG_MATCH_MEDIUM = 14;  // 2-Frame-Konsens
-  // > MEDIUM: kein Match — auf OCR fallback
-
   function runOcrOnCanvas() {
     var canvas = document.getElementById("live-canvas");
-
-    // Primärer Weg: Bilderkennung via dHash
-    if (hashDb && hashDb.hashes.length > 0) {
-      var cardCrop = cropGuideBoxArea(canvas);
-      var queryHash = computeDHash(cardCrop);
-      var match = queryHash ? findBestImageMatch(queryHash) : null;
-      if (match && match.card && match.distance <= IMG_MATCH_MEDIUM) {
-        return handleImageMatch(canvas, match);
-      }
-      // Schwacher / kein Match → trotzdem OCR versuchen
-      if (match) {
-        updateScanDiag(null,
-          "Kein klarer Bild-Match (beste Distanz " + match.distance + "). OCR-Fallback läuft …",
-          "warn");
-      }
-    }
 
     findCardNumber(canvas).then(function(info) {
       if (!info || !info.number) {
@@ -1801,68 +1512,6 @@
     });
   }
 
-  // Image-Match-Konsens-Buffer — analog zum OCR-Buffer.
-  // Strong-Match (Distanz ≤ 8) bestätigt sofort. Medium-Match (≤14) braucht
-  // 2 Frames mit derselben Karte zur Bestätigung.
-  var liveRecentImgMatches = [];
-
-  function handleImageMatch(canvas, match) {
-    var card = match.card;
-    var dist = match.distance;
-    var label = (card.set || "?") + " · " + (card.name || card.number || "?");
-
-    if (dist <= IMG_MATCH_STRONG) {
-      // Sofortige Bestätigung
-      liveRecentImgMatches = [];
-      setLiveStatusPill("Erkannt: " + label, true);
-      updateScanDiag(null,
-        "Bild-Match: " + label + "  (Distanz " + dist + ", sicher)",
-        "ok");
-      return finalizeImageMatch(canvas, card);
-    }
-
-    // Medium-Match: 2-Frame-Konsens auf gleicher Karte
-    liveRecentImgMatches.unshift({ id: card.riftcodexId, card: card, ts: Date.now() });
-    if (liveRecentImgMatches.length > 6) liveRecentImgMatches.length = 6;
-    // Stale eintraege fallen lassen (>30s)
-    var now = Date.now();
-    liveRecentImgMatches = liveRecentImgMatches.filter(function(r) { return now - r.ts < 30000; });
-
-    var counts = {};
-    liveRecentImgMatches.forEach(function(r) { counts[r.id] = (counts[r.id] || 0) + 1; });
-    if (counts[card.riftcodexId] >= 2) {
-      liveRecentImgMatches = [];
-      setLiveStatusPill("Bestätigt: " + label, true);
-      updateScanDiag(null,
-        "Bild-Match bestätigt: " + label + "  (Distanz " + dist + ", 2× gesehen)",
-        "ok");
-      return finalizeImageMatch(canvas, card);
-    }
-
-    setLiveStatusPill(label + " (1× — warte auf 2×)", true);
-    updateScanDiag(null,
-      "Bild-Match: " + label + " — Distanz " + dist + ", brauche 2. Bestätigung",
-      "warn");
-    liveBusy = false;
-    return null;
-  }
-
-  function finalizeImageMatch(canvas, card) {
-    return new Promise(function(resolve) {
-      canvas.toBlob(function(blob) {
-        if (!blob) { liveBusy = false; resolve(); return; }
-        var file = new File([blob], "live-" + Date.now() + ".jpg", { type: "image/jpeg" });
-        // addToQueue mit preResult das schon die Karte enthält → keine Suche mehr nötig
-        addToQueue(file, {
-          number: card.number,
-          setCode: card.setId,
-          matchedCard: card // signalisiert: direkt diese Karte nehmen
-        });
-        resolve();
-      }, "image/jpeg", 0.92);
-    });
-  }
-
   function rememberRead(info) {
     liveRecentReads.unshift({
       number: info.number,
@@ -1926,22 +1575,6 @@
       }
     }
     return null;
-  }
-
-  function updateHashBuildProgress(done, total) {
-    var banner = document.getElementById("hash-build-banner");
-    var bar = document.getElementById("hbb-bar");
-    var status = document.getElementById("hbb-status");
-    if (!banner || !bar || !status) return;
-    if (done >= total) { hideHashBuildBanner(); return; }
-    banner.classList.remove("hidden");
-    var pct = total > 0 ? Math.round((done / total) * 100) : 0;
-    bar.style.width = pct + "%";
-    status.textContent = done + " / " + total + "  (" + pct + "%)";
-  }
-  function hideHashBuildBanner() {
-    var banner = document.getElementById("hash-build-banner");
-    if (banner) banner.classList.add("hidden");
   }
 
   function updateScanDiag(info, text, level) {
@@ -2297,14 +1930,8 @@
       document.getElementById("api-key-overlay").classList.remove("hidden");
     };
 
-    // Riftcodex-Kartenliste im Hintergrund laden, danach Hash-DB anlegen
-    loadRiftcodexCache().then(function() {
-      var existing = loadHashDbFromStorage();
-      if (existing) hashDb = existing;
-      ensureHashDb(updateHashBuildProgress).then(function() {
-        hideHashBuildBanner();
-      });
-    });
+    // Riftcodex-Kartenliste im Hintergrund laden
+    loadRiftcodexCache();
     // OCR-Engine vorwärmen (verhindert Verzögerung beim ersten Scan)
     var ocrStatus = document.getElementById("ocr-engine-status");
     if (typeof TextDetector !== "undefined") {
