@@ -140,7 +140,7 @@
   .foil-checkbox-row input { width: 16px; height: 16px; accent-color: #C9A24B; }
 
   .live-video-wrap { position: relative; border-radius: 14px; overflow: hidden; background: #000; margin-bottom: 8px; }
-  .live-video-wrap video { width: 100%; display: block; aspect-ratio: 3 / 4; object-fit: cover; max-height: 62vh; }
+  .live-video-wrap video { width: 100%; display: block; aspect-ratio: 3 / 4; object-fit: cover; max-height: 62vh; cursor: crosshair; }
   .live-status-bar { position: absolute; top: 10px; left: 10px; right: 10px; display: flex; justify-content: space-between; align-items: center; }
   .live-status-pill {
     background: rgba(0,0,0,0.55); color: #EDE7D9; font-size: 11px; font-weight: 600; padding: 5px 10px;
@@ -161,6 +161,16 @@
   }
   .live-torch-btn.on { background: rgba(201,162,75,0.85); color: #1A1710; border-color: rgba(201,162,75,1); }
   .live-torch-btn.hidden { display: none; }
+  .live-focus-reticle {
+    position: absolute; width: 60px; height: 60px; border-radius: 50%;
+    border: 2px solid #C9A24B; box-shadow: 0 0 0 2px rgba(0,0,0,0.4);
+    pointer-events: none; animation: focusPulse 0.7s ease-out forwards;
+  }
+  @keyframes focusPulse {
+    0%   { transform: scale(1.4); opacity: 0; }
+    30%  { transform: scale(1.0); opacity: 1; }
+    100% { transform: scale(0.8); opacity: 0; }
+  }
   .live-frame-guide {
     /* TCG-Karte 63×88mm = 1.4:1 — Im 3:4-Container: Breite 72% → Höhe ≈ 76% → AR=1.41 */
     position: absolute; top: 12%; left: 14%; right: 14%; bottom: 12%;
@@ -283,7 +293,7 @@
         <span class="live-status-pill" id="live-status-pill">Karte ruhig vor die Kamera halten</span>
       </div>
       <div class="live-cam-info" id="live-cam-info">— × —</div>
-      <button type="button" id="live-torch-btn" class="live-torch-btn hidden">Blitz an</button>
+      <button type="button" id="live-torch-btn" class="live-torch-btn hidden">Blitz aus</button>
       <div class="live-frame-guide"></div>
     </div>
     <button type="button" id="live-scan-stop-btn" class="btn-secondary focus-ring" style="width: 100%;">✕ Live-Scan beenden</button>
@@ -1014,17 +1024,21 @@
       // (Android Chrome ja, iOS Safari nein, manche Frontkameras nein)
       liveTorchTrack = track;
       liveTorchOn = false;
+      liveTorchMode = "off";
       var torchBtn = document.getElementById("live-torch-btn");
       var caps = track && track.getCapabilities ? track.getCapabilities() : null;
       if (torchBtn) {
         if (caps && caps.torch) {
           torchBtn.classList.remove("hidden");
           torchBtn.classList.remove("on");
-          torchBtn.textContent = "Blitz an";
+          torchBtn.textContent = "Blitz aus";
         } else {
           torchBtn.classList.add("hidden");
         }
       }
+
+      // Tap-to-Focus auf das Live-Bild — bessere Schärfe bei Nahaufnahmen
+      setupTapToFocus(video, track);
 
       // Wenn der Kamera-Track von außen beendet wird (z.B. Anruf kommt rein,
       // eine andere App übernimmt die Kamera, Nutzer entzieht die Berechtigung
@@ -1172,16 +1186,38 @@
     if (!video || video.readyState < 2) return;
 
     liveBusy = true;
-    // Hohe Kamera-Auflösung auf sinnvolle OCR-Größe runterskalieren
-    // (1400px Breite ist mehr als genug für Kartennummern, OCR bleibt schnell)
-    var vw = video.videoWidth, vh = video.videoHeight;
-    var maxW = 1400;
-    var scale = vw > maxW ? maxW / vw : 1;
-    canvas.width  = Math.round(vw * scale);
-    canvas.height = Math.round(vh * scale);
-    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    setLiveStatusPill("Lese Nummer …", true);
+    function doCaptureAndOCR() {
+      // Hohe Kamera-Auflösung auf sinnvolle OCR-Größe runterskalieren
+      // (1400px Breite ist mehr als genug für Kartennummern, OCR bleibt schnell)
+      var vw = video.videoWidth, vh = video.videoHeight;
+      var maxW = 1400;
+      var scale = vw > maxW ? maxW / vw : 1;
+      canvas.width  = Math.round(vw * scale);
+      canvas.height = Math.round(vh * scale);
+      canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      // Scan-Modus: Blitz direkt nach dem Capture wieder aus —
+      // OCR braucht kein Licht mehr, das passiert auf dem Canvas
+      if (liveTorchMode === "scan") torchSet(false);
+
+      setLiveStatusPill("Lese Nummer …", true);
+      return runOcrOnCanvas();
+    }
+
+    // Scan-Modus: Blitz kurz vor dem Capture an, ~180ms warten damit
+    // die Belichtungs-Automatik sich auf das hellere Bild einstellt
+    if (liveTorchMode === "scan") {
+      torchSet(true).then(function() {
+        setTimeout(doCaptureAndOCR, 180);
+      });
+      return;
+    }
+    doCaptureAndOCR();
+  }
+
+  function runOcrOnCanvas() {
+    var canvas = document.getElementById("live-canvas");
 
     findCardNumber(canvas).then(function(info) {
       if (!info || !info.number) {
@@ -1563,7 +1599,7 @@
 
     document.getElementById("live-scan-start-btn").onclick = startLiveScan;
     document.getElementById("live-scan-stop-btn").onclick = stopLiveScan;
-    document.getElementById("live-torch-btn").onclick = toggleTorch;
+    document.getElementById("live-torch-btn").onclick = cycleTorch;
 
     function handleFiles(fileList) {
       Array.prototype.slice.call(fileList || []).forEach(function (f) { addToQueue(f); });
