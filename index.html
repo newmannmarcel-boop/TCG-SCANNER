@@ -523,21 +523,45 @@
     return s;
   }
 
-  // Findet beste Karte für ein Query-Embedding
+  // Findet beste Karten für ein Query-Embedding.
+  // WICHTIG: Riftcodex hat für viele Karten mehrere Einträge mit identischem
+  // Artwork (z.B. Teemo erscheint 4× in verschiedenen Sets/Promo-Varianten —
+  // gleiches Bild). Bilderkennung kann diese NICHT unterscheiden — sie haben
+  // identische Embeddings. Deshalb sammeln wir ALLE Karten innerhalb eines
+  // engen Similarity-Bands um die beste, und lassen die Filter (Promo/AltArt)
+  // bzw. eine User-Auswahl entscheiden.
   function findBestEmbeddingMatch(queryEmb) {
     if (!embedDb || !embedDb.cardIds.length) return null;
-    var bestSim = -Infinity, bestIdx = -1;
+    var bestSim = -Infinity;
     var dim = EMBED_DIM;
     var all = embedDb.embeddings;
-    for (var i = 0; i < embedDb.cardIds.length; i++) {
+    var N = embedDb.cardIds.length;
+    var sims = new Float32Array(N);
+    // 1. Durchlauf: alle Similarities berechnen + Maximum finden
+    for (var i = 0; i < N; i++) {
       var s = 0, off = i * dim;
       for (var j = 0; j < dim; j++) s += queryEmb[j] * all[off + j];
-      if (s > bestSim) { bestSim = s; bestIdx = i; }
+      sims[i] = s;
+      if (s > bestSim) bestSim = s;
     }
-    if (bestIdx < 0) return null;
-    var cardId = embedDb.cardIds[bestIdx];
-    var card = (riftcodexCache || []).filter(function(c) { return c.riftcodexId === cardId; })[0];
-    return { card: card, similarity: bestSim, index: bestIdx };
+    // 2. Durchlauf: alle Karten innerhalb 0.005 vom Best einsammeln
+    var tieBand = 0.005;
+    var candidates = [];
+    for (var k = 0; k < N; k++) {
+      if (sims[k] >= bestSim - tieBand) {
+        var cardId = embedDb.cardIds[k];
+        var card = (riftcodexCache || []).filter(function(c) { return c.riftcodexId === cardId; })[0];
+        if (card) candidates.push({ card: card, similarity: sims[k] });
+      }
+    }
+    if (candidates.length === 0) return null;
+    return {
+      candidates: candidates,
+      bestSimilarity: bestSim,
+      // Für Backwards-Kompatibilität: card = die mit höchster Similarity (irgendeine bei Tie)
+      card: candidates[0].card,
+      similarity: bestSim
+    };
   }
 
   // Lädt ein Bild von URL und gibt es als <img>-Element zurück
@@ -1309,12 +1333,16 @@
 
     resultPromise.then(function (result) {
       var foilValue = foilMode === "foilOnly" ? true : foilMode === "nonFoilOnly" ? false : false;
-      // Wenn Bilderkennung schon eine konkrete Karte geliefert hat → direkt nehmen
-      var candidatesPromise = result.matchedCard
-        ? Promise.resolve([result.matchedCard])
-        : result.number
-          ? searchRiftboundByNumber(result.number, result.setCode).catch(function () { return []; })
-          : Promise.resolve([]);
+      // Wenn Bilderkennung Kandidaten geliefert hat → direkt nehmen
+      // (matchedCandidates = Liste aller Karten mit identischem Artwork,
+      // matchedCard = einzelne Karte für legacy-Aufrufe)
+      var candidatesPromise = result.matchedCandidates
+        ? Promise.resolve(result.matchedCandidates)
+        : result.matchedCard
+          ? Promise.resolve([result.matchedCard])
+          : result.number
+            ? searchRiftboundByNumber(result.number, result.setCode).catch(function () { return []; })
+            : Promise.resolve([]);
 
       return candidatesPromise.then(function (candidates) {
         var entry = queue.filter(function (e) { return e.id === entryId; })[0];
@@ -1745,11 +1773,17 @@
     return runOcrOnCanvas();
   }
 
-  // Behandelt einen Embedding-Match: strong = sofort confirm, medium = 2-Frame-Konsens
+  // Behandelt einen Embedding-Match. match.candidates enthält ALLE Karten
+  // innerhalb der Tie-Band der besten Similarity (oft mehrere bei Karten
+  // mit identischem Artwork in verschiedenen Sets/Promo-Varianten).
   function handleEmbeddingMatch(canvas, match) {
-    var card = match.card;
-    var sim = match.similarity;
-    var label = (card.set || "?") + " · " + (card.name || card.number || "?");
+    var sim = match.bestSimilarity;
+    var cands = match.candidates;
+    // Cluster-Key für Konsens: sortierte cardIds → stabil über Frames hinweg
+    var clusterKey = cands.map(function(c) { return c.card.riftcodexId; }).sort().join("|");
+    var lead = cands[0].card;
+    var label = (lead.set || "?") + " · " + (lead.name || lead.number || "?") +
+                (cands.length > 1 ? " (+" + (cands.length - 1) + " Variante" + (cands.length > 2 ? "n" : "") + ")" : "");
 
     if (sim >= EMB_MATCH_STRONG) {
       liveRecentImgMatches = [];
@@ -1757,24 +1791,24 @@
       updateScanDiag(null,
         "Bild-Match: " + label + "  (Similarity " + sim.toFixed(2) + ", sicher)",
         "ok");
-      return finalizeEmbeddingMatch(canvas, card);
+      return finalizeEmbeddingMatch(canvas, cands);
     }
 
-    // Medium-Match → 2-Frame-Konsens
+    // Medium-Match → 2-Frame-Konsens auf dem ClusterKey
     var now = Date.now();
-    liveRecentImgMatches.unshift({ id: card.riftcodexId, card: card, sim: sim, ts: now });
+    liveRecentImgMatches.unshift({ clusterKey: clusterKey, candidates: cands, sim: sim, ts: now });
     if (liveRecentImgMatches.length > 6) liveRecentImgMatches.length = 6;
     liveRecentImgMatches = liveRecentImgMatches.filter(function(r) { return now - r.ts < 30000; });
 
     var counts = {};
-    liveRecentImgMatches.forEach(function(r) { counts[r.id] = (counts[r.id] || 0) + 1; });
-    if (counts[card.riftcodexId] >= 2) {
+    liveRecentImgMatches.forEach(function(r) { counts[r.clusterKey] = (counts[r.clusterKey] || 0) + 1; });
+    if (counts[clusterKey] >= 2) {
       liveRecentImgMatches = [];
       setLiveStatusPill("Bestätigt: " + label, true);
       updateScanDiag(null,
         "Bild-Match bestätigt: " + label + "  (Similarity " + sim.toFixed(2) + ", 2× gesehen)",
         "ok");
-      return finalizeEmbeddingMatch(canvas, card);
+      return finalizeEmbeddingMatch(canvas, cands);
     }
 
     setLiveStatusPill(label + " (1× — warte auf 2×)", true);
@@ -1785,15 +1819,18 @@
     return null;
   }
 
-  function finalizeEmbeddingMatch(canvas, card) {
+  function finalizeEmbeddingMatch(canvas, candidates) {
     return new Promise(function(resolve) {
       canvas.toBlob(function(blob) {
         if (!blob) { liveBusy = false; resolve(); return; }
         var file = new File([blob], "live-" + Date.now() + ".jpg", { type: "image/jpeg" });
+        // matchedCandidates: Liste aller Karten im Tie-Band → addToQueue filtert
+        // mit den spezialFilters und zeigt Auswahl wenn mehrere übrig
+        var firstCard = candidates[0].card;
         addToQueue(file, {
-          number: card.number,
-          setCode: card.setId,
-          matchedCard: card // direkt diese Karte übernehmen, keine Nummern-Suche nötig
+          number: firstCard.number,
+          setCode: firstCard.setId,
+          matchedCandidates: candidates.map(function(c) { return c.card; })
         });
         resolve();
       }, "image/jpeg", 0.92);

@@ -26,18 +26,21 @@ async function fetchAllCards() {
 }
 
 async function imageToTensor(url) {
+  // WICHTIG: Bild NICHT pre-resizen. MobileNet-Wrapper macht intern
+  // tf.image.resizeBilinear auf 224x224 — wir müssen genauso die volle
+  // Originalgröße liefern wie der Browser auch (sonst zwei verschiedene
+  // Resize-Algorithmen → leicht abweichende Embeddings)
   const img = await Jimp.read(url);
-  // jimp lädt RGBA. Auf 224x224 resizen (was MobileNet erwartet)
-  img.resize({ w: 224, h: 224 });
-  const buffer = img.bitmap.data; // RGBA uint8, 224*224*4
-  // RGB → uint8 Tensor [224, 224, 3] — der MobileNet-Wrapper macht Preprocessing selbst
-  const rgb = new Uint8Array(224 * 224 * 3);
+  const W = img.bitmap.width, H = img.bitmap.height;
+  const buffer = img.bitmap.data; // RGBA uint8, W*H*4
+  // RGBA → RGB als int32 Tensor [H, W, 3]
+  const rgb = new Uint8Array(W * H * 3);
   for (let i = 0, j = 0; i < buffer.length; i += 4, j += 3) {
     rgb[j]     = buffer[i];
     rgb[j + 1] = buffer[i + 1];
     rgb[j + 2] = buffer[i + 2];
   }
-  return tf.tensor3d(rgb, [224, 224, 3], 'int32');
+  return tf.tensor3d(rgb, [H, W, 3], 'int32');
 }
 
 async function main() {
