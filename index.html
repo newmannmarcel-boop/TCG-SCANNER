@@ -414,8 +414,11 @@
   // (verhindert falsche Bestätigungen bei OCR-Wackeln zwischen Frames)
   var liveRecentReads = [];
   var REQUIRED_AGREEMENT = 2; // gleiche Nummer in N aufeinanderfolgenden Reads → akzeptiert
-  var READ_BUFFER_MAX = 4;
-  var READ_TTL_MS = 6000;
+  // Großer Buffer + lange TTL: Auf Epic/Showcase-Karten klappt OCR nur
+  // 1 von 5-8 Versuchen. Die erste erfolgreiche Lesung muss lange genug
+  // erhalten bleiben bis eine zweite kommt.
+  var READ_BUFFER_MAX = 12;
+  var READ_TTL_MS = 30000;
 
   var riftcodexCache = null;
   var riftcodexCachePromise = null;
@@ -1238,7 +1241,7 @@
       liveActive = true;
       document.getElementById("live-scan-start-btn").classList.add("hidden");
       document.getElementById("live-video-section").classList.remove("hidden");
-      liveInterval = setInterval(captureLiveFrame, 1500);
+      liveInterval = setInterval(captureLiveFrame, 1000);
     }).catch(function (e) {
       console.error(e);
       var name = (e && e.name) ? e.name : "UnknownError";
@@ -1434,8 +1437,19 @@
 
     findCardNumber(canvas).then(function(info) {
       if (!info || !info.number) {
-        setLiveStatusPill("Keine Nummer erkannt — Karte ruhig halten", false);
-        updateScanDiag(null, "Keine Nummer im Bild gefunden", "warn");
+        // OCR fehlgeschlagen — Buffer wird NICHT geleert, frühere Lesungen
+        // bleiben erhalten bis zur TTL. Status zeigt aktuellen Buffer-Stand.
+        var pending = getMostPromisingPending();
+        if (pending) {
+          setLiveStatusPill(pending.label + " (" + pending.count + "× — warte auf " + REQUIRED_AGREEMENT + "×)", true);
+          updateScanDiag(null,
+            "Aktueller Versuch: keine Nummer gelesen\n" +
+            "Bisher: " + pending.label + " (" + pending.count + "/" + REQUIRED_AGREEMENT + ")",
+            "warn");
+        } else {
+          setLiveStatusPill("Keine Nummer erkannt — Karte ruhig halten", false);
+          updateScanDiag(null, "Keine Nummer im Bild gefunden", "warn");
+        }
         liveBusy = false;
         return;
       }
@@ -1498,6 +1512,27 @@
     return liveRecentReads.filter(function(r) {
       return r.number === number && now - r.ts < READ_TTL_MS;
     }).length;
+  }
+
+  // Häufigste Lesung im Buffer — für Status-Anzeige bei fehlgeschlagenem OCR
+  // damit User sieht "ich hab 309/298 schonmal gehört, warte auf Bestätigung"
+  function getMostPromisingPending() {
+    var now = Date.now();
+    var valid = liveRecentReads.filter(function(r) { return now - r.ts < READ_TTL_MS; });
+    if (!valid.length) return null;
+    var counts = {};
+    valid.forEach(function(r) { counts[r.number] = (counts[r.number] || 0) + 1; });
+    var bestNum = null, bestN = 0;
+    for (var n in counts) { if (counts[n] > bestN) { bestN = counts[n]; bestNum = n; } }
+    if (!bestNum) return null;
+    var bestSetCode = null;
+    valid.forEach(function(r) { if (r.number === bestNum && r.setCode && !bestSetCode) bestSetCode = r.setCode; });
+    return {
+      number: bestNum,
+      setCode: bestSetCode,
+      count: bestN,
+      label: bestSetCode ? bestSetCode + " " + bestNum : bestNum
+    };
   }
 
   // Sucht im Buffer nach einer Nummer die REQUIRED_AGREEMENT-mal vorkommt.
