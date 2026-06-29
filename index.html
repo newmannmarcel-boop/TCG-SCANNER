@@ -192,6 +192,16 @@
   .live-scan-diag.warn { border-color: #4A3A1A; color: #D4B49A; }
   .live-scan-diag.err  { border-color: #4A2E1E; color: #D4A49A; }
   .live-scan-diag.hidden { display: none; }
+  .embed-build-banner {
+    background: #1A1710; border: 1px solid #3A2E1E; border-radius: 12px;
+    padding: 14px 16px; margin-bottom: 18px;
+  }
+  .embed-build-banner.hidden { display: none; }
+  .ebb-title { color: #C9A24B; font-size: 13px; font-weight: 700; margin-bottom: 10px; letter-spacing: 0.3px; }
+  .ebb-progress { background: #0E0C08; border-radius: 6px; height: 8px; overflow: hidden; margin-bottom: 6px; }
+  .ebb-bar { background: linear-gradient(90deg,#8A6E1F,#C9A24B); height: 100%; width: 0%; transition: width 0.25s ease; }
+  .ebb-status { color: #C9A24B; font-size: 11px; font-weight: 600; margin-bottom: 8px; font-variant-numeric: tabular-nums; }
+  .ebb-hint { color: #8A8270; font-size: 11px; line-height: 1.45; }
   .live-frame-guide {
     /* TCG-Karte 63×88mm = 1.4:1 — Im 3:4-Container: Breite 72% → Höhe ≈ 76% → AR=1.41 */
     position: absolute; top: 12%; left: 14%; right: 14%; bottom: 12%;
@@ -257,6 +267,12 @@
   details > summary { font-size: 11px; color: #6B6452; cursor: pointer; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<!-- TensorFlow.js + MobileNet v2 für Bilderkennung (Hauptweg seit v6). -->
+<!-- Wird einmalig (~14 MB) geladen, danach Browser-Cache. Liefert       -->
+<!-- 1280-dim Embeddings für jedes Bild → Cosine-Similarity-Vergleich    -->
+<!-- gegen vorberechnete Karten-Embeddings.                              -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.1/dist/mobilenet.min.js"></script>
 </head>
 <body>
 
@@ -286,6 +302,12 @@
 </header>
 
 <main id="view-scan">
+  <div id="embed-build-banner" class="embed-build-banner hidden">
+    <div class="ebb-title" id="ebb-title">Karten-Datenbank wird vorbereitet</div>
+    <div class="ebb-progress"><div class="ebb-bar" id="ebb-bar"></div></div>
+    <div class="ebb-status" id="ebb-status">0 / 0</div>
+    <div class="ebb-hint">Einmaliger Vorgang beim ersten Start. Du kannst schon scannen — OCR springt solange ein. Sobald fertig: Bilderkennung deutlich schneller und genauer.</div>
+  </div>
   <div style="margin-bottom: 16px;">
     <div class="section-label">Scan-Modus</div>
     <div class="mode-row" id="foil-mode-row">
@@ -425,6 +447,240 @@
   var STORAGE_KEY_RCACHE = "kartenkammer_riftcodex_v4";
 
   var _ocrWorker = null; // Tesseract-Worker (wird beim ersten Scan geladen)
+
+  // ============================================================
+  // BILDERKENNUNG (TensorFlow.js + MobileNet v2) — Hauptweg
+  // ============================================================
+  // Idee: Statt OCR auf winzige Kartennummern lesen wir das Karten-
+  // Artwork als Ganzes. MobileNet ist ein vortrainiertes ML-Modell
+  // das jedes Bild in einen 1280-dim "Fingerabdruck" verwandelt der
+  // visuelle Konzepte erfasst (nicht nur Pixel). Robuste Erkennung
+  // gegen Beleuchtung, Perspektive, Foto-vs-Artwork-Unterschiede.
+  //
+  // Architektur:
+  //   1. Modell laden (einmalig, ~14 MB Browser-Cache)
+  //   2. Für alle 1064 Karten Embedding aus offiziellem Bild vorberechnen
+  //      → Datei riftbound-embeddings.json (~4 MB)
+  //   3. Pro Scan: Live-Frame → Embedding → Cosine-Similarity gegen alle
+  //      → Karte mit höchster Similarity
+  //
+  // Vergleich dHash (gescheitert): nur 64-bit Pixel-Hash, zu grob für
+  // 1064 Karten. MobileNet-Embeddings sind 1280-dim aus gelerntem Modell
+  // → discriminieren viel besser.
+
+  var EMBED_DIM = 1280; // MobileNet v2 alpha 1.0
+  var embedModel = null;
+  var embedModelLoading = null;
+  var embedDb = null;           // { embeddings: Float32Array[N*1280], cardIds: [...] }
+  var embedDbBuildPromise = null;
+  var STORAGE_KEY_EMBEDDB = "kartenkammer_riftbound_embeddings_v1";
+
+  // Modell asynchron laden — gibt Promise zurück die mit dem Modell auflöst
+  function loadEmbedModel() {
+    if (embedModel) return Promise.resolve(embedModel);
+    if (embedModelLoading) return embedModelLoading;
+    if (typeof mobilenet === "undefined") {
+      return Promise.reject(new Error("MobileNet-Lib nicht geladen"));
+    }
+    embedModelLoading = mobilenet.load({ version: 2, alpha: 1.0 }).then(function(m) {
+      embedModel = m;
+      embedModelLoading = null;
+      console.log("[MobileNet] geladen (v2 alpha 1.0)");
+      return m;
+    }).catch(function(err) {
+      embedModelLoading = null;
+      console.warn("[MobileNet] Laden fehlgeschlagen:", err);
+      throw err;
+    });
+    return embedModelLoading;
+  }
+
+  // Embedding aus Bild/Canvas extrahieren — gibt Float32Array(1280) zurück
+  // (normalisiert auf Länge 1 → Cosine-Similarity = Dot-Product)
+  function extractEmbedding(imgOrCanvas) {
+    if (!embedModel) return Promise.reject(new Error("Modell nicht geladen"));
+    // model.infer(img, true) → Embedding-Layer statt Klassifikation
+    var activation = embedModel.infer(imgOrCanvas, true);
+    return activation.data().then(function(arr) {
+      activation.dispose();
+      // L2-Normalisierung
+      var norm = 0;
+      for (var i = 0; i < arr.length; i++) norm += arr[i] * arr[i];
+      norm = Math.sqrt(norm);
+      if (norm > 0) {
+        var out = new Float32Array(arr.length);
+        for (var i = 0; i < arr.length; i++) out[i] = arr[i] / norm;
+        return out;
+      }
+      return new Float32Array(arr);
+    });
+  }
+
+  // Cosine-Similarity zwischen zwei normalisierten Embeddings
+  function cosineSim(a, b) {
+    var s = 0;
+    for (var i = 0; i < a.length; i++) s += a[i] * b[i];
+    return s;
+  }
+
+  // Findet beste Karte für ein Query-Embedding
+  function findBestEmbeddingMatch(queryEmb) {
+    if (!embedDb || !embedDb.cardIds.length) return null;
+    var bestSim = -Infinity, bestIdx = -1;
+    var dim = EMBED_DIM;
+    var all = embedDb.embeddings;
+    for (var i = 0; i < embedDb.cardIds.length; i++) {
+      var s = 0, off = i * dim;
+      for (var j = 0; j < dim; j++) s += queryEmb[j] * all[off + j];
+      if (s > bestSim) { bestSim = s; bestIdx = i; }
+    }
+    if (bestIdx < 0) return null;
+    var cardId = embedDb.cardIds[bestIdx];
+    var card = (riftcodexCache || []).filter(function(c) { return c.riftcodexId === cardId; })[0];
+    return { card: card, similarity: bestSim, index: bestIdx };
+  }
+
+  // Lädt ein Bild von URL und gibt es als <img>-Element zurück
+  function loadImage(url) {
+    return new Promise(function(resolve, reject) {
+      var img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = function() { resolve(img); };
+      img.onerror = function(e) { reject(e); };
+      // 15s Timeout
+      setTimeout(function() { reject(new Error("Image-Timeout")); }, 15000);
+      img.src = url;
+    });
+  }
+
+  // Crop des Live-Frames auf den Guide-Box-Bereich (= die Karte)
+  function cropGuideBoxArea(canvas) {
+    var W = canvas.width, H = canvas.height;
+    var x = Math.floor(W * 0.14), y = Math.floor(H * 0.12);
+    var w = Math.floor(W * 0.72), h = Math.floor(H * 0.76);
+    var out = document.createElement("canvas");
+    out.width = w; out.height = h;
+    out.getContext("2d").drawImage(canvas, x, y, w, h, 0, 0, w, h);
+    return out;
+  }
+
+  // Embedding-DB aus statischer JSON-Datei laden (im Repo mitgeliefert).
+  // Format: { dim, cardIds: [...], embeddings: [[f32, ...], ...] }
+  // Wir konvertieren die Arrays in eine flache Float32Array für schnellen Vergleich.
+  function loadPrebuiltEmbedDb() {
+    return fetch("./riftbound-embeddings.json", { cache: "force-cache" })
+      .then(function(r) {
+        if (!r.ok) throw new Error("kein Prebuilt");
+        return r.json();
+      })
+      .then(function(parsed) {
+        if (!parsed || !parsed.cardIds || !parsed.embeddings ||
+            parsed.cardIds.length !== parsed.embeddings.length ||
+            !parsed.cardIds.length) {
+          throw new Error("Embedding-Datei ungültig");
+        }
+        var dim = parsed.dim || EMBED_DIM;
+        var n = parsed.cardIds.length;
+        var flat = new Float32Array(n * dim);
+        for (var i = 0; i < n; i++) {
+          var row = parsed.embeddings[i];
+          for (var j = 0; j < dim; j++) flat[i * dim + j] = row[j];
+        }
+        console.log("[Embeddings] Prebuilt geladen:", n, "Karten");
+        return { embeddings: flat, cardIds: parsed.cardIds, dim: dim };
+      })
+      .catch(function(err) {
+        console.warn("[Embeddings] Prebuilt nicht verfügbar:", err.message);
+        return null;
+      });
+  }
+
+  // Embedding-DB selbst bauen (Fallback wenn keine Prebuilt-Datei).
+  // Lädt alle Karten-Bilder, extrahiert Embeddings. SEHR LANGSAM (~10 Min).
+  function buildEmbedDatabase(onProgress) {
+    if (embedDbBuildPromise) return embedDbBuildPromise;
+    embedDbBuildPromise = Promise.all([loadEmbedModel(), loadRiftcodexCache()])
+      .then(function(arr) {
+        var cache = arr[1];
+        var withImg = cache.filter(function(c) { return c.imageUrl && c.riftcodexId; });
+        var total = withImg.length;
+        if (!total) return { embeddings: new Float32Array(0), cardIds: [], dim: EMBED_DIM };
+
+        var emb = new Float32Array(total * EMBED_DIM);
+        var ids = new Array(total);
+        var ok = 0, idx = 0;
+        if (onProgress) onProgress(0, total);
+
+        function processOne(card) {
+          return loadImage(card.imageUrl)
+            .then(function(img) { return extractEmbedding(img); })
+            .then(function(vec) {
+              emb.set(vec, ok * EMBED_DIM);
+              ids[ok] = card.riftcodexId;
+              ok++;
+            })
+            .catch(function(err) {
+              console.warn("[Embed] skip", card.name, err.message || err);
+            });
+        }
+
+        function nextOne() {
+          if (idx >= withImg.length) {
+            return { embeddings: emb.slice(0, ok * EMBED_DIM), cardIds: ids.slice(0, ok), dim: EMBED_DIM };
+          }
+          var card = withImg[idx++];
+          return processOne(card).then(function() {
+            if (onProgress) onProgress(idx, total);
+            return nextOne();
+          });
+        }
+        return nextOne();
+      })
+      .then(function(db) {
+        embedDb = db;
+        return db;
+      });
+    return embedDbBuildPromise;
+  }
+
+  function ensureEmbedDb(onProgress) {
+    if (embedDb && embedDb.cardIds.length > 0) return Promise.resolve(embedDb);
+    return loadPrebuiltEmbedDb().then(function(prebuilt) {
+      if (prebuilt) {
+        embedDb = prebuilt;
+        return embedDb;
+      }
+      return buildEmbedDatabase(onProgress);
+    });
+  }
+
+  // Dev-Werkzeug: exportiert die aktuell gebaute Embedding-DB als JSON-Datei.
+  // In der Konsole: exportEmbedDb()
+  function exportEmbedDb() {
+    if (!embedDb || !embedDb.cardIds.length) {
+      console.warn("[Export] Embedding-DB ist leer"); return;
+    }
+    var n = embedDb.cardIds.length, dim = embedDb.dim;
+    var embArr = new Array(n);
+    for (var i = 0; i < n; i++) {
+      var row = new Array(dim);
+      for (var j = 0; j < dim; j++) {
+        // Auf 4 Nachkommastellen runden — spart ~50% Platz, Genauigkeit ausreichend
+        row[j] = Math.round(embedDb.embeddings[i * dim + j] * 10000) / 10000;
+      }
+      embArr[i] = row;
+    }
+    var payload = { dim: dim, cardIds: embedDb.cardIds, embeddings: embArr };
+    var json = JSON.stringify(payload);
+    var blob = new Blob([json], { type: "application/json" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "riftbound-embeddings.json";
+    document.body.appendChild(a); a.click(); a.remove();
+    console.log("[Export] riftbound-embeddings.json (" + n + " Karten, " +
+                Math.round(json.length / 1024) + " KB)");
+  }
+  window.exportEmbedDb = exportEmbedDb;
 
   function uid() {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -1053,9 +1309,12 @@
 
     resultPromise.then(function (result) {
       var foilValue = foilMode === "foilOnly" ? true : foilMode === "nonFoilOnly" ? false : false;
-      var candidatesPromise = result.number
-        ? searchRiftboundByNumber(result.number, result.setCode).catch(function () { return []; })
-        : Promise.resolve([]);
+      // Wenn Bilderkennung schon eine konkrete Karte geliefert hat → direkt nehmen
+      var candidatesPromise = result.matchedCard
+        ? Promise.resolve([result.matchedCard])
+        : result.number
+          ? searchRiftboundByNumber(result.number, result.setCode).catch(function () { return []; })
+          : Promise.resolve([]);
 
       return candidatesPromise.then(function (candidates) {
         var entry = queue.filter(function (e) { return e.id === entryId; })[0];
@@ -1304,6 +1563,7 @@
     liveActive = false;
     liveTorchTrack = null; liveTorchOn = false; liveTorchMode = "off";
     liveRecentReads = [];
+    liveRecentImgMatches = [];
     var tb = document.getElementById("live-torch-btn");
     if (tb) { tb.classList.add("hidden"); tb.classList.remove("on"); tb.textContent = "Blitz aus"; }
     var diag = document.getElementById("live-scan-diag");
@@ -1427,8 +1687,8 @@
       // OCR braucht kein Licht mehr, das passiert auf dem Canvas
       if (liveTorchMode === "scan") torchSet(false);
 
-      setLiveStatusPill("Lese Nummer …", true);
-      return runOcrOnCanvas();
+      setLiveStatusPill("Lese …", true);
+      return runScanOnCanvas();
     }
 
     // Scan-Modus: Blitz kurz vor dem Capture an, ~180ms warten damit
@@ -1440,6 +1700,104 @@
       return;
     }
     doCaptureAndOCR();
+  }
+
+  // Cosine-Similarity Schwellen für Embedding-Match
+  // Erfahrungswerte für MobileNet v2 Embeddings:
+  //   ≥ 0.78 → sehr ähnlich, fast sicher dieselbe Karte → sofort bestätigen
+  //   ≥ 0.65 → ähnlich, wahrscheinlich dieselbe → 2-Frame-Konsens
+  //   <  0.65 → nicht klar → OCR-Fallback
+  var EMB_MATCH_STRONG = 0.78;
+  var EMB_MATCH_MEDIUM = 0.65;
+
+  // Konsens-Buffer für Embedding-Matches (analog zum OCR-Buffer)
+  var liveRecentImgMatches = [];
+
+  // Top-Level Scan: erst Embedding-Match probieren, dann OCR-Fallback
+  function runScanOnCanvas() {
+    var canvas = document.getElementById("live-canvas");
+    // Wenn Modell + DB bereit → Embedding-Match versuchen
+    if (embedModel && embedDb && embedDb.cardIds.length > 0) {
+      try {
+        var cardCrop = cropGuideBoxArea(canvas);
+        return extractEmbedding(cardCrop).then(function(queryEmb) {
+          var match = findBestEmbeddingMatch(queryEmb);
+          if (match && match.card && match.similarity >= EMB_MATCH_MEDIUM) {
+            return handleEmbeddingMatch(canvas, match);
+          }
+          // schwacher Match → OCR als Fallback
+          if (match) {
+            updateScanDiag(null,
+              "Kein klarer Bild-Match (beste Similarity " + match.similarity.toFixed(2) + "). OCR-Fallback läuft …",
+              "warn");
+          }
+          return runOcrOnCanvas();
+        }).catch(function(err) {
+          console.warn("[Embed] Extraktion fehlgeschlagen:", err);
+          return runOcrOnCanvas();
+        });
+      } catch (e) {
+        console.warn("[Embed] unerwarteter Fehler:", e);
+        return runOcrOnCanvas();
+      }
+    }
+    // Kein Embedding-Modell verfügbar → direkt OCR
+    return runOcrOnCanvas();
+  }
+
+  // Behandelt einen Embedding-Match: strong = sofort confirm, medium = 2-Frame-Konsens
+  function handleEmbeddingMatch(canvas, match) {
+    var card = match.card;
+    var sim = match.similarity;
+    var label = (card.set || "?") + " · " + (card.name || card.number || "?");
+
+    if (sim >= EMB_MATCH_STRONG) {
+      liveRecentImgMatches = [];
+      setLiveStatusPill("Erkannt: " + label, true);
+      updateScanDiag(null,
+        "Bild-Match: " + label + "  (Similarity " + sim.toFixed(2) + ", sicher)",
+        "ok");
+      return finalizeEmbeddingMatch(canvas, card);
+    }
+
+    // Medium-Match → 2-Frame-Konsens
+    var now = Date.now();
+    liveRecentImgMatches.unshift({ id: card.riftcodexId, card: card, sim: sim, ts: now });
+    if (liveRecentImgMatches.length > 6) liveRecentImgMatches.length = 6;
+    liveRecentImgMatches = liveRecentImgMatches.filter(function(r) { return now - r.ts < 30000; });
+
+    var counts = {};
+    liveRecentImgMatches.forEach(function(r) { counts[r.id] = (counts[r.id] || 0) + 1; });
+    if (counts[card.riftcodexId] >= 2) {
+      liveRecentImgMatches = [];
+      setLiveStatusPill("Bestätigt: " + label, true);
+      updateScanDiag(null,
+        "Bild-Match bestätigt: " + label + "  (Similarity " + sim.toFixed(2) + ", 2× gesehen)",
+        "ok");
+      return finalizeEmbeddingMatch(canvas, card);
+    }
+
+    setLiveStatusPill(label + " (1× — warte auf 2×)", true);
+    updateScanDiag(null,
+      "Bild-Match: " + label + " — Similarity " + sim.toFixed(2) + ", brauche 2. Bestätigung",
+      "warn");
+    liveBusy = false;
+    return null;
+  }
+
+  function finalizeEmbeddingMatch(canvas, card) {
+    return new Promise(function(resolve) {
+      canvas.toBlob(function(blob) {
+        if (!blob) { liveBusy = false; resolve(); return; }
+        var file = new File([blob], "live-" + Date.now() + ".jpg", { type: "image/jpeg" });
+        addToQueue(file, {
+          number: card.number,
+          setCode: card.setId,
+          matchedCard: card // direkt diese Karte übernehmen, keine Nummern-Suche nötig
+        });
+        resolve();
+      }, "image/jpeg", 0.92);
+    });
   }
 
   function runOcrOnCanvas() {
@@ -1575,6 +1933,27 @@
       }
     }
     return null;
+  }
+
+  function showEmbedBuildBanner(title, done, total) {
+    var banner = document.getElementById("embed-build-banner");
+    var t = document.getElementById("ebb-title");
+    var bar = document.getElementById("ebb-bar");
+    var status = document.getElementById("ebb-status");
+    if (!banner) return;
+    banner.classList.remove("hidden");
+    if (t && title) t.textContent = title;
+    var pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    if (bar) bar.style.width = pct + "%";
+    if (status) status.textContent = done + " / " + total + "  (" + pct + "%)";
+  }
+  function updateEmbedBuildProgress(done, total) {
+    if (done >= total) { hideEmbedBuildBanner(); return; }
+    showEmbedBuildBanner("Karten-Datenbank wird vorbereitet", done, total);
+  }
+  function hideEmbedBuildBanner() {
+    var banner = document.getElementById("embed-build-banner");
+    if (banner) banner.classList.add("hidden");
   }
 
   function updateScanDiag(info, text, level) {
@@ -1930,8 +2309,23 @@
       document.getElementById("api-key-overlay").classList.remove("hidden");
     };
 
-    // Riftcodex-Kartenliste im Hintergrund laden
-    loadRiftcodexCache();
+    // Riftcodex-Kartenliste im Hintergrund laden + ML-Modell + Embedding-DB
+    loadRiftcodexCache().then(function() {
+      // Modell direkt laden (~14 MB, dann im Browser-Cache)
+      showEmbedBuildBanner("ML-Modell wird geladen …", 0, 1);
+      loadEmbedModel().then(function() {
+        // Modell da → Embedding-DB sicherstellen (Prebuilt JSON oder selbst bauen)
+        showEmbedBuildBanner("Karten-Datenbank wird vorbereitet", 0, 1);
+        return ensureEmbedDb(updateEmbedBuildProgress);
+      }).then(function() {
+        hideEmbedBuildBanner();
+        console.log("[Setup] Bilderkennung bereit:",
+                    embedDb ? embedDb.cardIds.length : 0, "Karten");
+      }).catch(function(err) {
+        hideEmbedBuildBanner();
+        console.warn("[Setup] Bilderkennung nicht verfügbar → OCR-Fallback:", err);
+      });
+    });
     // OCR-Engine vorwärmen (verhindert Verzögerung beim ersten Scan)
     var ocrStatus = document.getElementById("ocr-engine-status");
     if (typeof TextDetector !== "undefined") {
