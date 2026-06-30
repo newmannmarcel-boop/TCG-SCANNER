@@ -1237,18 +1237,29 @@
   }
 
   // ORB-DB laden + base64 → Uint8Array → Uint32Array-View
-  // cache:"reload" stellt sicher dass eine alte 404-Antwort nicht stuck-cached
-  // bleibt (typisches Problem nach Deploy-Refresh)
+  // Mit detailliertem Logging für jeden Schritt damit wir bei Fehler exakt wissen wo's hakt
   function loadOrbDatabase() {
     if (orbDb) return Promise.resolve(orbDb);
     if (orbDbLoading) return orbDbLoading;
-    // Cache-Bust via Query-String — Browser sieht "neue" Ressource
-    // wenn die ORB-DB neu deployed wurde
-    var url = "./riftbound-orb.json?v=20260630-orb";
+    var url = "./riftbound-orb.json?v=20260630-orb2";
+    console.log("[ORB] Lade DB von:", url);
+    var fetchStart = performance.now();
     orbDbLoading = fetch(url, { cache: "no-cache" })
       .then(function(r) {
-        if (!r.ok) throw new Error("ORB-DB nicht verfügbar (HTTP " + r.status + ")");
-        return r.json();
+        console.log("[ORB] Response erhalten:",
+                    "status=" + r.status,
+                    "type=" + r.type,
+                    "size=" + (r.headers.get("content-length") || "?"));
+        if (!r.ok) throw new Error("HTTP " + r.status + " " + r.statusText);
+        return r.text(); // Erst als Text holen, dann selbst parsen — bei Parse-Fehlern besseres Logging
+      })
+      .then(function(text) {
+        console.log("[ORB] Download fertig in " + Math.round(performance.now() - fetchStart) + "ms" +
+                    ", Größe " + (text.length / 1024 / 1024).toFixed(1) + "MB");
+        var parsed;
+        try { parsed = JSON.parse(text); }
+        catch (e) { throw new Error("JSON-Parse-Fehler: " + e.message); }
+        return parsed;
       })
       .then(function(parsed) {
         if (!parsed.cardIds || !parsed.keypointCounts || !parsed.descriptorsBase64) {
@@ -1285,7 +1296,14 @@
         return orbDb;
       })
       .catch(function(err) {
-        console.warn("[ORB] DB nicht geladen:", err.message);
+        console.error("[ORB] DB-Load FEHLGESCHLAGEN:",
+                      "name=" + (err.name || "?"),
+                      "message=" + (err.message || "?"),
+                      "url=" + url);
+        console.error("[ORB] Mögliche Ursachen: stale Cache (Browser-Cache leeren!), " +
+                      "Datei noch nicht deployed (1-2 Min nach git push warten), " +
+                      "Netzwerk-Timeout (Datei ist 10MB), " +
+                      "JSON-Parse-Fehler (Datei korrupt)");
         orbDbLoading = null;
         return null;
       });
