@@ -1453,12 +1453,16 @@
     };
   }
 
-  // Match-Schwellen — basierend auf Test-Daten:
-  //   Selbst-Match bei 200 Query-Keypoints → typisch 150-190 good matches
-  //   Cross-Match zwischen verschiedenen Karten → 1-15 good matches
-  //   Robuster Schwellenwert: best >= 30 UND margin >= 12
-  var ORB_MIN_SCORE = 30;
-  var ORB_MIN_MARGIN = 12;
+  // Match-Schwellen — KALIBRIERT auf echte Handy-Daten (nicht Test-Bilder!)
+  // Beobachtung User-Logs nach Aspect-Fix:
+  //   Echte Treffer (Void Drone korrekt): score 14-17, margin 3-6
+  //   Noise (zufällige Top-Picks):       score 4-12, margin 0-2
+  // Klare Trennung bei score >= 12 UND margin >= 3.
+  // (Die alten 30/12 waren basierend auf einem unrealistischen Test
+  //  mit identischen Bildern — Handy-Fotos vs Studio-Referenz liefern
+  //  systematisch deutlich niedrigere absolute Scores.)
+  var ORB_MIN_SCORE = 12;
+  var ORB_MIN_MARGIN = 3;
 
   function uid() {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
