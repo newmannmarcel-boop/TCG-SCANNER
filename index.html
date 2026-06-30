@@ -2542,94 +2542,69 @@
   function runScanOnCanvas() {
     var canvas = document.getElementById("live-canvas");
 
+    // PRIORITÄT 1: ORB-Feature-Matching (Hauptweg).
+    // Wenn ORB-DB geladen ist, probieren wir ORB zuerst. Bei klarem Match
+    // (score >= 30 UND margin >= 12) wird die Karte sofort übernommen.
+    // Bei unklarem ORB-Ergebnis → OCR als Fallback.
+    if (orbDb && typeof jsfeat !== "undefined") {
+      try {
+        var t0 = performance.now();
+        var cardCrop = cropGuideBoxArea(canvas);
+        var orbQuery = extractOrbFromCanvas(cardCrop, ORB_QUERY_MAX_KP);
+        var t1 = performance.now();
+
+        if (orbQuery && orbQuery.count >= 10) {
+          var match = matchOrbAgainstDb(orbQuery);
+          var t2 = performance.now();
+
+          if (match) {
+            var top3str = match.top3.map(function(c) {
+              return (c.card ? c.card.name : "?") + " (" + c.score + ")";
+            }).join(", ");
+            console.log("[ORB-Match] Query=" + orbQuery.count + "kp" +
+                        " extract=" + Math.round(t1 - t0) + "ms" +
+                        " match=" + Math.round(t2 - t1) + "ms" +
+                        " best=" + match.bestScore + " margin=" + match.margin +
+                        " | Top-3: " + top3str);
+
+            var passesHard = match.bestScore >= ORB_MIN_SCORE && match.margin >= ORB_MIN_MARGIN;
+            if (passesHard) {
+              console.log("[Vergleich] ORB=" + (match.bestCard ? match.bestCard.name : "?") +
+                          " (score " + match.bestScore + ", margin " + match.margin + ")" +
+                          " | OCR=ÜBERSPRUNGEN (ORB hat Wahrheit) | Entscheidung=ORB-PFAD");
+              return finalizeOrbMatch(canvas, match);
+            }
+            // ORB nicht konfident → OCR-Fallback wird gleich versucht
+            console.log("[ORB] Unklarer Match (score " + match.bestScore +
+                        ", margin " + match.margin + ") → OCR-Fallback");
+          }
+        } else {
+          var kpCount = orbQuery ? orbQuery.count : 0;
+          console.log("[ORB] zu wenig Keypoints (" + kpCount + ") → OCR-Fallback");
+        }
+      } catch (e) {
+        console.warn("[ORB] Fehler — versuche OCR:", e);
+      }
+    }
+
+    // PRIORITÄT 2: OCR als Fallback (oder Primär wenn ORB-DB fehlt)
     return findCardNumber(canvas).then(function(info) {
       if (info && info.number) {
-        // OCR-Pfad — Bild wird gar nicht erst befragt
         console.log("[Vergleich] OCR=" + info.number +
                     (info.setCode ? " (" + info.setCode + ")" : "") +
-                    " | ORB=IGNORIERT (OCR hat Wahrheit) | Entscheidung=OCR-PFAD");
+                    " | Entscheidung=OCR-PFAD (ORB-Fallback)");
         return processOcrConfirmedInfo(canvas, info);
       }
 
-      // OCR fand nichts → ORB-Feature-Matching als BACKUP
-      if (orbDb && typeof jsfeat !== "undefined") {
-        try {
-          var t0 = performance.now();
-          var cardCrop = cropGuideBoxArea(canvas);
-          var orbQuery = extractOrbFromCanvas(cardCrop, ORB_QUERY_MAX_KP);
-          var t1 = performance.now();
-          if (!orbQuery || orbQuery.count < 10) {
-            var kpCount = orbQuery ? orbQuery.count : 0;
-            console.log("[Vergleich] OCR=null | ORB=zu wenig Keypoints (" + kpCount + ") | REJECT");
-            setLiveStatusPill("Bild zu detail-arm — Karte anders halten", false);
-            updateScanDiag(null,
-              "ABGELEHNT\nOCR: keine Nummer.\nORB: nur " + kpCount + " Keypoints (min 10)\n→ Bild hat zu wenig Details (unscharf?)",
-              "err");
-            liveBusy = false;
-            return;
-          }
-
-          var match = matchOrbAgainstDb(orbQuery);
-          var t2 = performance.now();
-          if (!match) {
-            console.log("[Vergleich] OCR=null | ORB=DB-Match fehlgeschlagen | REJECT");
-            setLiveStatusPill("Karte nicht erkannt", false);
-            liveBusy = false;
-            return;
-          }
-
-          var top3str = match.top3.map(function(c) {
-            return (c.card ? c.card.name : "?") + " (" + c.score + ")";
-          }).join(", ");
-          console.log("[ORB-Match] Query=" + orbQuery.count + "kp" +
-                      " extract=" + Math.round(t1 - t0) + "ms" +
-                      " match=" + Math.round(t2 - t1) + "ms" +
-                      " best=" + match.bestScore + " margin=" + match.margin +
-                      " | Top-3: " + top3str);
-
-          var passesHard = match.bestScore >= ORB_MIN_SCORE && match.margin >= ORB_MIN_MARGIN;
-          var grund;
-          if (match.bestScore < ORB_MIN_SCORE) {
-            grund = "Score " + match.bestScore + " UNTER " + ORB_MIN_SCORE +
-                    " → kein klarer Treffer, ABGELEHNT";
-          } else if (match.margin < ORB_MIN_MARGIN) {
-            grund = "Margin " + match.margin + " UNTER " + ORB_MIN_MARGIN +
-                    " → zu wenig Abstand zum 2. Platz, ABGELEHNT";
-          } else {
-            grund = "AKZEPTIERT (score >= " + ORB_MIN_SCORE + " UND margin >= " + ORB_MIN_MARGIN + ")";
-          }
-          console.log("[Vergleich] OCR=null | ORB=" + (match.bestCard ? match.bestCard.name : "?") +
-                      " (score " + match.bestScore + ", margin " + match.margin + ")" +
-                      " | Entscheidung=" + (passesHard ? "ORB-PFAD" : "REJECT") + " | " + grund);
-
-          if (passesHard) {
-            return finalizeOrbMatch(canvas, match);
-          }
-
-          setLiveStatusPill("Karte nicht erkannt — anders halten", false);
-          updateScanDiag(null,
-            "ABGELEHNT\n" +
-            "OCR: keine Nummer.\n" +
-            "ORB-Top-3: " + top3str + "\n" +
-            "Grund: " + grund,
-            "err");
-          liveBusy = false;
-        } catch (e) {
-          console.warn("[ORB] Fehler:", e);
-          setLiveStatusPill("Karte nicht erkannt", false);
-          liveBusy = false;
-        }
-        return;
-      }
-
-      // Kein ORB verfügbar UND kein OCR-Treffer
-      console.log("[Vergleich] OCR=null | ORB=DB nicht geladen | REJECT");
-      setLiveStatusPill("Karte nicht erkannt", false);
+      // Beide Wege haben nichts gefunden → ehrlicher Reject
+      console.log("[Vergleich] ORB=unsicher | OCR=null | Entscheidung=REJECT");
+      setLiveStatusPill("Karte nicht erkannt — anders halten", false);
       var pending = getMostPromisingPending();
-      updateScanDiag(null,
-        pending ? "OCR: nichts gelesen. Buffer hat noch " + pending.label + " (" + pending.count + "/" + REQUIRED_AGREEMENT + ")"
-                : "OCR: nichts gelesen.",
-        "warn");
+      var diagText = "ABGELEHNT\n" +
+                     "ORB: kein klarer Treffer\n" +
+                     "OCR: keine Nummer gelesen";
+      if (pending) diagText += "\nBuffer: " + pending.label + " (" + pending.count + "/" + REQUIRED_AGREEMENT + ")";
+      updateScanDiag(null, diagText, "warn");
       liveBusy = false;
     }).catch(function(err) {
       console.warn("[Scan] Fehler:", err);
