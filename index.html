@@ -2312,65 +2312,125 @@
     });
   }
 
-  // Top-Level Scan: erst Embedding-Match probieren, dann OCR-Fallback
+  // STRATEGIE-WECHSEL: OCR ist jetzt Primär-Erkennung, Bild-Match nur noch
+  // als Backup wenn OCR komplett nichts lesen kann.
+  //
+  // Grund: Bilderkennung halluziniert zu oft falsche Matches. OCR liest die
+  // tatsächlich aufgedruckte Karten-Nummer — wenn die da ist, ist sie wahr.
+  // Image-Match nur noch bei OCR-Totalausfall (kein Text gefunden).
   function runScanOnCanvas() {
     var canvas = document.getElementById("live-canvas");
-    // Wenn Modell + DB bereit → Embedding-Match versuchen
-    if (embedModel && embedDb && embedDb.cardIds.length > 0) {
-      try {
+
+    // Schritt 1: OCR versuchen. Liefert Promise<info|null>
+    return findCardNumber(canvas).then(function(info) {
+      if (info && info.number) {
+        // OCR hat eine Nummer gelesen → Wahrheit, Bild-Match ignorieren
+        console.log("[Scan-Pfad] OCR gewinnt — gelesen:", info.number,
+                    info.setCode ? "Set " + info.setCode : "(ohne Set-Code)");
+        return processOcrConfirmedInfo(canvas, info);
+      }
+
+      // Schritt 2: OCR fand nichts. Versuche Bild-Match als Backup.
+      if (embedModel && embedDb && embedDb.cardIds.length > 0) {
+        console.log("[Scan-Pfad] OCR fand keine Nummer → Bild-Match als Backup");
         return findBestMatchAcrossCrops(canvas).then(function(match) {
           if (match && match.candidates && match.candidates.length > 0) {
             var top = match.candidates.slice(0, 3).map(function(c) {
               return (c.card.set || "?") + " " + (c.card.name || c.card.number || "?") +
                      " (raw " + c.similarity.toFixed(3) + " adj " + (c.adjustedSimilarity || c.similarity).toFixed(3) + ")";
             }).join("\n  ");
-            console.log("[Embed-Match] Crop=" + match.cropUsed +
-                        " rawSim=" + (match.rawBestSimilarity || 0).toFixed(3) +
+            console.log("[Bild-Backup] Crop=" + match.cropUsed +
                         " adjSim=" + match.bestSimilarity.toFixed(3) +
                         " margin=" + (match.margin || 0).toFixed(3) +
                         " hub(count=" + (match.hubCountOfBest || 0) +
-                        ", rank=" + (match.hubRankOfBest != null ? match.hubRankOfBest : "?") +
-                        ") penalty(static=" + (match.staticPenaltyOfBest || 0).toFixed(3) +
-                        ", session=" + (match.sessionPenaltyOfBest || 0).toFixed(3) + ")" +
-                        "\nTop-3:\n  " + top);
+                        ", rank=" + (match.hubRankOfBest != null ? match.hubRankOfBest : "?") + ")" +
+                        " Top-3:\n  " + top);
           }
-          // Ein klarer Treffer braucht ZWEI Bedingungen: hohe Similarity
-          // UND deutlicher Abstand zum 2. Platz. Sonst war's geraten.
           var sim = match ? match.similarity : 0;
           var margin = match ? (match.margin || 0) : 0;
+          // STRENGE Backup-Schwellen — nur sehr klare Bild-Matches durchlassen
+          // (auch dann nur als "wahrscheinlich" markieren, nicht als sicher)
           var isStrong = match && sim >= EMB_MATCH_STRONG && margin >= EMB_MIN_MARGIN_STRONG;
-          var isMedium = match && sim >= EMB_MATCH_MEDIUM && margin >= EMB_MIN_MARGIN_MEDIUM;
-          if (isStrong || isMedium) {
+          if (isStrong) {
+            console.log("[Scan-Pfad] Bild-Backup akzeptiert (sehr klarer Match)");
             match.isStrong = isStrong;
             return handleEmbeddingMatch(canvas, match);
           }
-          // Kein konfidenter Match → OCR als Fallback
-          if (match) {
-            var topText = match.candidates.slice(0, 3).map(function(c) {
-              return "  " + (c.card.name || c.card.number || "?") +
-                     " (raw " + c.similarity.toFixed(3) + " adj " + (c.adjustedSimilarity || c.similarity).toFixed(3) + ")";
-            }).join("\n");
-            updateScanDiag(null,
-              "Kein klarer Bild-Match. adjSim: " + sim.toFixed(3) +
-              " (raw " + (match.rawBestSimilarity || 0).toFixed(3) + ")" +
-              " | Margin: " + margin.toFixed(3) +
-              " | Hub(best): " + (match.hubCountOfBest || 0) +
-              " | Crop: " + match.cropUsed + "\nTop-3:\n" + topText +
-              "\nOCR-Fallback läuft …",
-              "warn");
-          }
-          return runOcrOnCanvas();
+          // Weder OCR noch klares Bild → ehrlich melden, Frame verwerfen
+          console.log("[Scan-Pfad] Beide Wege unsicher → nichts übernommen");
+          setLiveStatusPill("Karte nicht erkannt — anders halten", false);
+          updateScanDiag(null,
+            "OCR: keine Nummer im Bild.\n" +
+            "Bild-Backup: zu unsicher (adjSim " + sim.toFixed(3) + ", Margin " + margin.toFixed(3) + ").\n" +
+            "Karte neu positionieren oder manuell eintragen.",
+            "warn");
+          liveBusy = false;
         }).catch(function(err) {
-          console.warn("[Embed] Extraktion fehlgeschlagen:", err);
-          return runOcrOnCanvas();
+          console.warn("[Bild-Backup] Fehler:", err);
+          setLiveStatusPill("Karte nicht erkannt", false);
+          liveBusy = false;
         });
-      } catch (e) {
-        console.warn("[Embed] unerwarteter Fehler:", e);
-        return runOcrOnCanvas();
       }
+
+      // Kein Modell verfügbar UND kein OCR-Treffer
+      console.log("[Scan-Pfad] OCR fand nichts, kein Bild-Modell verfügbar");
+      setLiveStatusPill("Karte nicht erkannt", false);
+      var pending = getMostPromisingPending();
+      updateScanDiag(null,
+        pending ? "OCR: nichts gelesen. Buffer hat noch " + pending.label + " (" + pending.count + "/" + REQUIRED_AGREEMENT + ")"
+                : "OCR: nichts gelesen.",
+        "warn");
+      liveBusy = false;
+    }).catch(function(err) {
+      console.warn("[Scan] OCR-Fehler:", err);
+      liveBusy = false;
+    });
+  }
+
+  // OCR hat eine Nummer gelesen. Führe die übliche Konsens-Validierung durch
+  // (verhindert dass eine einzelne falsche OCR-Lesung sofort übernommen wird).
+  function processOcrConfirmedInfo(canvas, info) {
+    rememberRead(info);
+    var confirmed = info.strong
+      ? { number: info.number, setCode: info.setCode || null }
+      : findConfirmedRead();
+
+    if (!confirmed) {
+      var label = info.setCode ? info.setCode + " " + info.number : info.number;
+      var count = countReads(info.number);
+      setLiveStatusPill(label + " (" + count + "× — warte auf " + REQUIRED_AGREEMENT + "×)", true);
+      updateScanDiag(info,
+        "OCR-Pfad: " + label + " (Bestätigung " + count + "/" + REQUIRED_AGREEMENT + ")\n" +
+        "Mehrere Frames müssen die selbe Nummer liefern bevor übernommen wird.",
+        "warn");
+      liveBusy = false;
+      return;
     }
-    // Kein Embedding-Modell verfügbar → direkt OCR
-    return runOcrOnCanvas();
+
+    // OCR bestätigt → übernehmen
+    liveRecentReads = [];
+    var confirmedLabel = confirmed.setCode ? confirmed.setCode + " " + confirmed.number : confirmed.number;
+    console.log("[Scan-Pfad] OCR bestätigt:", confirmedLabel);
+    setLiveStatusPill("Bestätigt: " + confirmedLabel, true);
+
+    return new Promise(function(resolve) {
+      canvas.toBlob(function(blob) {
+        if (!blob) { liveBusy = false; resolve(); return; }
+        var file = new File([blob], "live-" + Date.now() + ".jpg", { type: "image/jpeg" });
+        addToQueue(file, { number: confirmed.number, setCode: confirmed.setCode });
+        setTimeout(function() {
+          var diag = window._lastSearchDiag;
+          if (!diag) { updateScanDiag(confirmed, "Suche läuft …", null); resolve(); return; }
+          var ok = diag.matchedSet && diag.candidateCount === 1;
+          var line = "OCR bestätigt: " + (confirmed.setCode || "—") + " " + confirmed.number +
+                     " → " + (diag.matchedSet || "kein Match") +
+                     (diag.candidateCount ? "  (" + diag.candidateCount + " Treffer)" : "");
+          var detail = diag.reason || "";
+          updateScanDiag(confirmed, line + (detail ? "\n" + detail : ""), ok ? "ok" : "warn");
+          resolve();
+        }, 200);
+      }, "image/jpeg", 0.92);
+    });
   }
 
   // Behandelt einen Embedding-Match. match.candidates enthält ALLE Karten
