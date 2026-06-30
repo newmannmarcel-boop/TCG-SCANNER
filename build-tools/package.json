@@ -13,6 +13,7 @@
   "dependencies": {
     "@tensorflow-models/mobilenet": "^2.1.1",
     "@tensorflow/tfjs": "^4.22.0",
-    "jimp": "^1.6.1"
+    "jimp": "^1.6.1",
+    "jsfeat": "^0.0.8"
   }
 }

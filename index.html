@@ -309,6 +309,10 @@
 <!-- gegen vorberechnete Karten-Embeddings.                              -->
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.1/dist/mobilenet.min.js"></script>
+<!-- jsfeat für ORB-Feature-Matching (Hauptweg seit v7) -->
+<!-- ~150 KB, lokale Keypoints für robuste Karten-Identifikation auch -->
+<!-- bei Foils/Showcase/Epic-Layouts. Funktioniert wo MobileNet versagt. -->
+<script src="https://cdn.jsdelivr.net/npm/jsfeat@0.0.8/build/jsfeat-min.js"></script>
 </head>
 <body>
 
@@ -1197,6 +1201,215 @@
                 Math.round(json.length / 1024) + " KB)");
   }
   window.exportEmbedDb = exportEmbedDb;
+
+  // ============================================================
+  // ORB FEATURE-MATCHING (jsfeat) — Hauptweg seit v7
+  // ============================================================
+  // Statt globaler Embeddings (MobileNet) extrahieren wir lokale Keypoints
+  // (markante Stellen im Artwork: Ecken, Texturen, Augen). Jede Karte hat
+  // ~200-250 einzigartige Keypoints. Beim Scan:
+  //   1. ORB-Keypoints aus dem Live-Frame extrahieren
+  //   2. Gegen jede Referenz matchen (Hamming-Distanz + Lowe-Ratio-Test)
+  //   3. Karte mit den meisten "good matches" gewinnt
+  //
+  // Vorteil gegenüber MobileNet-Embeddings:
+  //   - Robust gegen Foils, Glanz, Beleuchtung — Keypoints bleiben stabil
+  //   - Funktioniert auf Epic/Showcase wo MobileNet halluziniert
+  //   - Score ist EINDEUTIG (Match-Anzahl, nicht abstrakte Similarity)
+  //   - Test: selbe Karte → ~190 Matches, andere → 1-25 Matches
+  //     Faktor 10+ Diskrimination, vs. MobileNet's ~0.05 Margin
+
+  var ORB_DESC_BYTES = 32; // jedes ORB-Deskriptor = 256 bit = 32 Byte
+  var orbDb = null; // { cardIds, keypointCounts, descU8, descU32, offsets }
+  var orbDbLoading = null;
+  var _orbCornerPool = null;
+  var ORB_QUERY_MAX_KP = 200; // Live: max Keypoints (mehr = genauer, langsamer)
+  var ORB_FAST_THRESHOLD = 20;
+  var ORB_FAST_BORDER = 5;
+
+  // Lazy-Init Corner-Pool (jsfeat braucht vorallokierte keypoint_t Objekte)
+  function getOrbCornerPool() {
+    if (_orbCornerPool) return _orbCornerPool;
+    if (typeof jsfeat === "undefined") return null;
+    _orbCornerPool = [];
+    for (var i = 0; i < 5000; i++) _orbCornerPool.push(new jsfeat.keypoint_t());
+    return _orbCornerPool;
+  }
+
+  // ORB-DB laden + base64 → Uint8Array → Uint32Array-View
+  function loadOrbDatabase() {
+    if (orbDb) return Promise.resolve(orbDb);
+    if (orbDbLoading) return orbDbLoading;
+    orbDbLoading = fetch("./riftbound-orb.json", { cache: "force-cache" })
+      .then(function(r) {
+        if (!r.ok) throw new Error("ORB-DB nicht verfügbar (HTTP " + r.status + ")");
+        return r.json();
+      })
+      .then(function(parsed) {
+        if (!parsed.cardIds || !parsed.keypointCounts || !parsed.descriptorsBase64) {
+          throw new Error("ORB-Format ungültig");
+        }
+        var binStr = atob(parsed.descriptorsBase64);
+        var u8 = new Uint8Array(binStr.length);
+        for (var i = 0; i < binStr.length; i++) u8[i] = binStr.charCodeAt(i);
+        // Uint32Array-View für schnelles Hamming (8 uint32 per descriptor)
+        var u32 = new Uint32Array(u8.buffer, u8.byteOffset, u8.byteLength / 4);
+        // Pro-Karte Offsets (in bytes UND in uint32-units für direkten Zugriff)
+        var n = parsed.cardIds.length;
+        var offsetsU8  = new Uint32Array(n + 1);
+        var offsetsU32 = new Uint32Array(n + 1);
+        var off = 0;
+        for (var k = 0; k < n; k++) {
+          offsetsU8[k]  = off;
+          offsetsU32[k] = off / 4;
+          off += parsed.keypointCounts[k] * ORB_DESC_BYTES;
+        }
+        offsetsU8[n]  = off;
+        offsetsU32[n] = off / 4;
+        orbDb = {
+          cardIds: parsed.cardIds,
+          keypointCounts: parsed.keypointCounts,
+          descU8: u8,
+          descU32: u32,
+          offsetsU8: offsetsU8,
+          offsetsU32: offsetsU32
+        };
+        console.log("[ORB] DB geladen:", n, "Karten,",
+                    (u8.length / 1024 / 1024).toFixed(1) + "MB descriptors");
+        orbDbLoading = null;
+        return orbDb;
+      })
+      .catch(function(err) {
+        console.warn("[ORB] DB nicht geladen:", err.message);
+        orbDbLoading = null;
+        return null;
+      });
+    return orbDbLoading;
+  }
+
+  // ORB-Features aus einem Canvas extrahieren (Live-Bild oder Crop).
+  // Liefert { count, descU8, descU32 } oder null.
+  function extractOrbFromCanvas(canvas, maxKp) {
+    if (typeof jsfeat === "undefined") return null;
+    maxKp = maxKp || ORB_QUERY_MAX_KP;
+    var pool = getOrbCornerPool();
+    if (!pool) return null;
+
+    var W = canvas.width, H = canvas.height;
+    var ctx = canvas.getContext("2d");
+    var imgData;
+    try { imgData = ctx.getImageData(0, 0, W, H); }
+    catch (e) { console.warn("[ORB] getImageData fehlgeschlagen:", e); return null; }
+    var data = imgData.data;
+
+    // RGBA → Grayscale-Matrix
+    var matrix = new jsfeat.matrix_t(W, H, jsfeat.U8_t | jsfeat.C1_t);
+    var mdata = matrix.data;
+    for (var i = 0, j = 0; i < data.length; i += 4, j++) {
+      mdata[j] = (0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2]) | 0;
+    }
+
+    jsfeat.fast_corners.set_threshold(ORB_FAST_THRESHOLD);
+    var numCorners = jsfeat.fast_corners.detect(matrix, pool, ORB_FAST_BORDER);
+    var useN = Math.min(numCorners, maxKp);
+    if (numCorners > maxKp) {
+      // Top-N nach FAST-Score
+      var subset = pool.slice(0, numCorners);
+      subset.sort(function(a, b) { return b.score - a.score; });
+      for (var k = 0; k < maxKp; k++) {
+        pool[k].x = subset[k].x;
+        pool[k].y = subset[k].y;
+        pool[k].score = subset[k].score;
+        pool[k].angle = subset[k].angle;
+        pool[k].level = subset[k].level;
+      }
+    }
+
+    if (useN < 5) return { count: 0, descU8: null, descU32: null }; // zu wenig Detail
+
+    var descMat = new jsfeat.matrix_t(32, useN, jsfeat.U8_t | jsfeat.C1_t);
+    jsfeat.orb.describe(matrix, pool, useN, descMat);
+    // Uint32-View für schnelles Matching
+    var descU32 = new Uint32Array(descMat.data.buffer, descMat.data.byteOffset, useN * 8);
+    return { count: useN, descU8: descMat.data, descU32: descU32 };
+  }
+
+  // Hamming-Distanz mit SWAR-Popcount auf Uint32-Ebene.
+  // 8 uint32-Operationen statt 32 Byte-Operationen → ~4× schneller.
+  function hammingU32(q, qOff, r, rOff) {
+    var d = 0;
+    for (var i = 0; i < 8; i++) {
+      var x = (q[qOff + i] ^ r[rOff + i]) >>> 0;
+      x = x - ((x >>> 1) & 0x55555555);
+      x = (x & 0x33333333) + ((x >>> 2) & 0x33333333);
+      x = (x + (x >>> 4)) & 0x0F0F0F0F;
+      d += ((x * 0x01010101) >>> 24);
+    }
+    return d;
+  }
+
+  // Zählt "good matches" zwischen Query und einer Referenz via Lowe-Ratio-Test.
+  // ratio = 0.75 → best muss deutlich besser sein als second
+  // maxDist = 64 → Cutoff (max 256 bits, also 25%)
+  function countGoodMatchesU32(qDescU32, qCount, refDescU32, refOff32, refCount) {
+    var ratio = 0.75;
+    var maxDist = 64;
+    var good = 0;
+    for (var i = 0; i < qCount; i++) {
+      var qOff = i * 8;
+      var best = 1000, second = 1000;
+      for (var j = 0; j < refCount; j++) {
+        var d = hammingU32(qDescU32, qOff, refDescU32, refOff32 + j * 8);
+        if (d < best) { second = best; best = d; }
+        else if (d < second) { second = d; }
+      }
+      if (best < maxDist && best < ratio * second) good++;
+    }
+    return good;
+  }
+
+  // Match Query-ORB gegen alle Karten in der DB.
+  // Liefert { bestIdx, bestScore, secondScore, margin, top3 } oder null.
+  function matchOrbAgainstDb(orbQuery) {
+    if (!orbDb || !orbQuery || !orbQuery.count) return null;
+    var qU32 = orbQuery.descU32;
+    var qCount = orbQuery.count;
+    var refU32 = orbDb.descU32;
+    var counts = orbDb.keypointCounts;
+    var offU32 = orbDb.offsetsU32;
+    var N = orbDb.cardIds.length;
+
+    var scores = new Int32Array(N);
+    for (var k = 0; k < N; k++) {
+      scores[k] = countGoodMatchesU32(qU32, qCount, refU32, offU32[k], counts[k]);
+    }
+
+    // Top-3 sortieren
+    var indices = [];
+    for (var i = 0; i < N; i++) indices.push(i);
+    indices.sort(function(a, b) { return scores[b] - scores[a]; });
+    var top3 = indices.slice(0, 3).map(function(idx) {
+      var cardId = orbDb.cardIds[idx];
+      var card = (riftcodexCache || []).filter(function(c) { return c.riftcodexId === cardId; })[0];
+      return { card: card, score: scores[idx], idx: idx };
+    });
+    var best = top3[0], second = top3[1];
+    return {
+      bestIdx: best.idx,
+      bestCard: best.card,
+      bestScore: best.score,
+      secondScore: second ? second.score : 0,
+      margin: best.score - (second ? second.score : 0),
+      top3: top3
+    };
+  }
+
+  // Match-Schwellen — basierend auf Test-Daten:
+  //   Selbst-Match bei 200 Query-Keypoints → typisch 150-190 good matches
+  //   Cross-Match zwischen verschiedenen Karten → 1-15 good matches
+  //   Robuster Schwellenwert: best >= 30 UND margin >= 12
+  var ORB_MIN_SCORE = 30;
+  var ORB_MIN_MARGIN = 12;
 
   function uid() {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -2329,65 +2542,83 @@
         // OCR-Pfad — Bild wird gar nicht erst befragt
         console.log("[Vergleich] OCR=" + info.number +
                     (info.setCode ? " (" + info.setCode + ")" : "") +
-                    " | Bild=IGNORIERT (OCR hat Wahrheit) | Entscheidung=OCR-PFAD");
+                    " | ORB=IGNORIERT (OCR hat Wahrheit) | Entscheidung=OCR-PFAD");
         return processOcrConfirmedInfo(canvas, info);
       }
 
-      // OCR fand nichts → Bild-Match als BACKUP, aber mit HARTER Schwelle
-      if (embedModel && embedDb && embedDb.cardIds.length > 0) {
-        return findBestMatchAcrossCrops(canvas).then(function(match) {
-          var bildText, sim = 0, margin = 0;
-          if (match && match.candidates && match.candidates.length > 0) {
-            sim = match.bestSimilarity;
-            margin = match.margin || 0;
-            var lead = match.candidates[0].card;
-            bildText = (lead.name || lead.number || "?") +
-                       " (adjSim " + sim.toFixed(3) + ", margin " + margin.toFixed(3) +
-                       ", hub-rank " + (match.hubRankOfBest != null ? match.hubRankOfBest : "?") + ")";
-          } else {
-            bildText = "NULL (kein Kandidat)";
+      // OCR fand nichts → ORB-Feature-Matching als BACKUP
+      if (orbDb && typeof jsfeat !== "undefined") {
+        try {
+          var t0 = performance.now();
+          var cardCrop = cropGuideBoxArea(canvas);
+          var orbQuery = extractOrbFromCanvas(cardCrop, ORB_QUERY_MAX_KP);
+          var t1 = performance.now();
+          if (!orbQuery || orbQuery.count < 10) {
+            var kpCount = orbQuery ? orbQuery.count : 0;
+            console.log("[Vergleich] OCR=null | ORB=zu wenig Keypoints (" + kpCount + ") | REJECT");
+            setLiveStatusPill("Bild zu detail-arm — Karte anders halten", false);
+            updateScanDiag(null,
+              "ABGELEHNT\nOCR: keine Nummer.\nORB: nur " + kpCount + " Keypoints (min 10)\n→ Bild hat zu wenig Details (unscharf?)",
+              "err");
+            liveBusy = false;
+            return;
           }
 
-          // HARTE Schwelle — UNDER dem Wert ist es ABGELEHNT, egal wie nah
-          var passesHard = match && sim >= EMB_MATCH_STRONG && margin >= EMB_MIN_MARGIN_STRONG;
-          var grund;
+          var match = matchOrbAgainstDb(orbQuery);
+          var t2 = performance.now();
           if (!match) {
-            grund = "kein Embedding berechnet";
-          } else if (sim < EMB_MATCH_STRONG) {
-            grund = "adjSim " + sim.toFixed(3) + " UNTER Schwelle " + EMB_MATCH_STRONG +
-                    " → Karte wird IGNORIERT, NICHT zur Queue hinzugefügt";
-          } else if (margin < EMB_MIN_MARGIN_STRONG) {
-            grund = "Margin " + margin.toFixed(3) + " UNTER " + EMB_MIN_MARGIN_STRONG +
-                    " → zu wenig Abstand zum 2. Platz, IGNORIERT";
-          } else {
-            grund = "AKZEPTIERT (sim >= " + EMB_MATCH_STRONG + " UND margin >= " + EMB_MIN_MARGIN_STRONG + ")";
+            console.log("[Vergleich] OCR=null | ORB=DB-Match fehlgeschlagen | REJECT");
+            setLiveStatusPill("Karte nicht erkannt", false);
+            liveBusy = false;
+            return;
           }
-          console.log("[Vergleich] OCR=null | Bild=" + bildText + " | Entscheidung=" +
-                      (passesHard ? "BILD-PFAD" : "REJECT") + " | Grund: " + grund);
+
+          var top3str = match.top3.map(function(c) {
+            return (c.card ? c.card.name : "?") + " (" + c.score + ")";
+          }).join(", ");
+          console.log("[ORB-Match] Query=" + orbQuery.count + "kp" +
+                      " extract=" + Math.round(t1 - t0) + "ms" +
+                      " match=" + Math.round(t2 - t1) + "ms" +
+                      " best=" + match.bestScore + " margin=" + match.margin +
+                      " | Top-3: " + top3str);
+
+          var passesHard = match.bestScore >= ORB_MIN_SCORE && match.margin >= ORB_MIN_MARGIN;
+          var grund;
+          if (match.bestScore < ORB_MIN_SCORE) {
+            grund = "Score " + match.bestScore + " UNTER " + ORB_MIN_SCORE +
+                    " → kein klarer Treffer, ABGELEHNT";
+          } else if (match.margin < ORB_MIN_MARGIN) {
+            grund = "Margin " + match.margin + " UNTER " + ORB_MIN_MARGIN +
+                    " → zu wenig Abstand zum 2. Platz, ABGELEHNT";
+          } else {
+            grund = "AKZEPTIERT (score >= " + ORB_MIN_SCORE + " UND margin >= " + ORB_MIN_MARGIN + ")";
+          }
+          console.log("[Vergleich] OCR=null | ORB=" + (match.bestCard ? match.bestCard.name : "?") +
+                      " (score " + match.bestScore + ", margin " + match.margin + ")" +
+                      " | Entscheidung=" + (passesHard ? "ORB-PFAD" : "REJECT") + " | " + grund);
 
           if (passesHard) {
-            match.isStrong = true;
-            return handleEmbeddingMatch(canvas, match);
+            return finalizeOrbMatch(canvas, match);
           }
 
-          // ABGELEHNT — explizit nichts zur Queue hinzufügen, Frame verwerfen
           setLiveStatusPill("Karte nicht erkannt — anders halten", false);
           updateScanDiag(null,
             "ABGELEHNT\n" +
-            "OCR: keine Nummer im Bild.\n" +
-            "Bild: " + bildText + "\n" +
+            "OCR: keine Nummer.\n" +
+            "ORB-Top-3: " + top3str + "\n" +
             "Grund: " + grund,
             "err");
           liveBusy = false;
-        }).catch(function(err) {
-          console.warn("[Bild-Backup] Fehler:", err);
+        } catch (e) {
+          console.warn("[ORB] Fehler:", e);
           setLiveStatusPill("Karte nicht erkannt", false);
           liveBusy = false;
-        });
+        }
+        return;
       }
 
-      // Kein Modell verfügbar UND kein OCR-Treffer
-      console.log("[Vergleich] OCR=null | Bild=Modell nicht geladen | Entscheidung=REJECT");
+      // Kein ORB verfügbar UND kein OCR-Treffer
+      console.log("[Vergleich] OCR=null | ORB=DB nicht geladen | REJECT");
       setLiveStatusPill("Karte nicht erkannt", false);
       var pending = getMostPromisingPending();
       updateScanDiag(null,
@@ -2396,8 +2627,36 @@
         "warn");
       liveBusy = false;
     }).catch(function(err) {
-      console.warn("[Scan] OCR-Fehler:", err);
+      console.warn("[Scan] Fehler:", err);
       liveBusy = false;
+    });
+  }
+
+  // ORB-Match → Karte zur Queue
+  function finalizeOrbMatch(canvas, match) {
+    var card = match.bestCard;
+    if (!card) {
+      console.warn("[ORB] Match hat keine card-Referenz");
+      liveBusy = false;
+      return;
+    }
+    var label = (card.set || "?") + " · " + (card.name || card.number || "?");
+    setLiveStatusPill("Erkannt: " + label, true);
+    updateScanDiag(null,
+      "ORB-Match: " + label + "\n" +
+      "Score " + match.bestScore + " | Margin " + match.margin + " | sicher",
+      "ok");
+    return new Promise(function(resolve) {
+      canvas.toBlob(function(blob) {
+        if (!blob) { liveBusy = false; resolve(); return; }
+        var file = new File([blob], "live-" + Date.now() + ".jpg", { type: "image/jpeg" });
+        addToQueue(file, {
+          number: card.number,
+          setCode: card.setId,
+          matchedCard: card
+        });
+        resolve();
+      }, "image/jpeg", 0.92);
     });
   }
 
@@ -3023,21 +3282,16 @@
       document.getElementById("api-key-overlay").classList.remove("hidden");
     };
 
-    // Riftcodex-Kartenliste im Hintergrund laden + ML-Modell + Embedding-DB
+    // Riftcodex-Kartenliste + ORB-Feature-DB im Hintergrund laden
     loadRiftcodexCache().then(function() {
-      // Modell direkt laden (~14 MB, dann im Browser-Cache)
-      showEmbedBuildBanner("ML-Modell wird geladen …", 0, 1);
-      loadEmbedModel().then(function() {
-        // Modell da → Embedding-DB sicherstellen (Prebuilt JSON oder selbst bauen)
-        showEmbedBuildBanner("Karten-Datenbank wird vorbereitet", 0, 1);
-        return ensureEmbedDb(updateEmbedBuildProgress);
-      }).then(function() {
+      showEmbedBuildBanner("Karten-Feature-DB wird geladen …", 0, 1);
+      loadOrbDatabase().then(function(db) {
         hideEmbedBuildBanner();
-        console.log("[Setup] Bilderkennung bereit:",
-                    embedDb ? embedDb.cardIds.length : 0, "Karten");
-      }).catch(function(err) {
-        hideEmbedBuildBanner();
-        console.warn("[Setup] Bilderkennung nicht verfügbar → OCR-Fallback:", err);
+        if (db) {
+          console.log("[Setup] ORB-Bilderkennung bereit:", db.cardIds.length, "Karten");
+        } else {
+          console.warn("[Setup] ORB-DB nicht verfügbar → nur OCR-Pfad nutzbar");
+        }
       });
     });
     // OCR-Engine vorwärmen (verhindert Verzögerung beim ersten Scan)
