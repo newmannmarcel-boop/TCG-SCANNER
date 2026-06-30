@@ -890,14 +890,40 @@
     });
   };
 
-  // Crop des Live-Frames mit konfigurierbaren Insets (in Prozent vom Frame).
-  // Default = Guide-Box-Bereich. Bei niedriger Match-Confidence probieren
-  // wir mehrere Crop-Größen durch (Karte kann verschoben/kleiner sein als Guide).
-  function cropCanvasRegion(canvas, leftPct, topPct, rightPct, bottomPct) {
+  // KRITISCH: Die <video>-Element hat im CSS aspect-ratio: 3/4 + object-fit: cover.
+  // Wenn der Video-Stream eine andere Aspect Ratio hat (z.B. 9:16 portrait
+  // 2160×3840), CROPPT das Display zentral — was der User in der Guide-Box
+  // sieht stimmt NICHT mit den gleichen Prozent-Koordinaten im Canvas überein.
+  // Wir müssen erst die "Visible Region" im Canvas berechnen die dem
+  // entspricht was der User auf dem Display sieht.
+  var DISPLAY_ASPECT_W = 3, DISPLAY_ASPECT_H = 4; // aus CSS .live-video-wrap video
+  function getVisibleRegion(canvas) {
+    var displayAspect = DISPLAY_ASPECT_W / DISPLAY_ASPECT_H; // 0.75
     var W = canvas.width, H = canvas.height;
-    var x = Math.floor(W * leftPct), y = Math.floor(H * topPct);
-    var w = Math.floor(W * (1 - leftPct - rightPct));
-    var h = Math.floor(H * (1 - topPct - bottomPct));
+    var canvasAspect = W / H;
+    if (canvasAspect > displayAspect) {
+      // Canvas breiter als Display → links/rechts gecroppt
+      var visH = H;
+      var visW = Math.round(H * displayAspect);
+      var visX = Math.round((W - visW) / 2);
+      return { x: visX, y: 0, w: visW, h: visH };
+    } else {
+      // Canvas schmaler als Display → oben/unten gecroppt (object-fit: cover)
+      var visW2 = W;
+      var visH2 = Math.round(W / displayAspect);
+      var visY = Math.round((H - visH2) / 2);
+      return { x: 0, y: visY, w: visW2, h: visH2 };
+    }
+  }
+
+  // Crop relativ zur SICHTBAREN Display-Region, nicht zum ganzen Canvas.
+  // Damit stimmen die Prozent-Koordinaten genau mit dem überein was User sieht.
+  function cropCanvasRegion(canvas, leftPct, topPct, rightPct, bottomPct) {
+    var vis = getVisibleRegion(canvas);
+    var x = Math.floor(vis.x + vis.w * leftPct);
+    var y = Math.floor(vis.y + vis.h * topPct);
+    var w = Math.floor(vis.w * (1 - leftPct - rightPct));
+    var h = Math.floor(vis.h * (1 - topPct - bottomPct));
     var out = document.createElement("canvas");
     out.width = w; out.height = h;
     out.getContext("2d").drawImage(canvas, x, y, w, h, 0, 0, w, h);
@@ -1736,21 +1762,21 @@
 
   function findCardNumberTesseract(canvas, W, H) {
     if (typeof Tesseract === "undefined") return Promise.resolve(null);
-    // Gezielter Crop: unten-links, wo die Nummer auf TCG-Karten steht.
-    // Wichtig — Crop bewusst LARGER als nötig damit Ziffern am Rand nicht
-    // abgeschnitten werden (z.B. wenn Karte leicht verschoben liegt und
-    // das erste "2" außerhalb des engen Crops landet → wurde als "0" gelesen)
-    var nbX = Math.floor(W * 0.08);   // bisschen weiter links für Puffer
-    var nbW = Math.floor(W * 0.52);   // breiter — fängt schiefe Karten
-    var nbY = Math.floor(H * 0.78);   // bisschen höher für Puffer
-    var nbH = Math.floor(H * 0.15);   // höher
+    // KRITISCH: Koordinaten beziehen sich auf die SICHTBARE Region (object-fit cover),
+    // nicht auf das ganze Canvas. Sonst zielt "unten links 8%" daneben sobald
+    // Video- und Display-Aspect unterschiedlich sind.
+    var vis = getVisibleRegion(canvas);
+    var nbX = Math.floor(vis.x + vis.w * 0.08);
+    var nbW = Math.floor(vis.w * 0.52);
+    var nbY = Math.floor(vis.y + vis.h * 0.78);
+    var nbH = Math.floor(vis.h * 0.15);
     var nbScale = Math.max(1.5, Math.min(3, 800 / nbW));
 
-    var scBase = Math.max(1.5, Math.min(2.5, 1000 / W));
+    var scBase = Math.max(1.5, Math.min(2.5, 1000 / vis.w));
     var _nb, _lo20, _lo50;
     function nbCrop() { return _nb   || (_nb   = cropAndScale(canvas, nbX, nbY, nbW, nbH, nbScale)); }
-    function lo20()   { return _lo20 || (_lo20 = cropAndScale(canvas, 0, Math.floor(H * 0.78), W, Math.floor(H * 0.20), scBase)); }
-    function lo50()   { return _lo50 || (_lo50 = cropAndScale(canvas, 0, Math.floor(H * 0.50), W, Math.floor(H * 0.48), scBase)); }
+    function lo20()   { return _lo20 || (_lo20 = cropAndScale(canvas, vis.x, Math.floor(vis.y + vis.h * 0.78), vis.w, Math.floor(vis.h * 0.20), scBase)); }
+    function lo50()   { return _lo50 || (_lo50 = cropAndScale(canvas, vis.x, Math.floor(vis.y + vis.h * 0.50), vis.w, Math.floor(vis.h * 0.48), scBase)); }
 
     // Mehr Versuche aber alle auf kleinen Crops → bleibt schnell.
     // Reihenfolge: Common/Uncommon (einfache Karten) zuerst, dann Spezial-
