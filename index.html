@@ -1237,10 +1237,15 @@
   }
 
   // ORB-DB laden + base64 → Uint8Array → Uint32Array-View
+  // cache:"reload" stellt sicher dass eine alte 404-Antwort nicht stuck-cached
+  // bleibt (typisches Problem nach Deploy-Refresh)
   function loadOrbDatabase() {
     if (orbDb) return Promise.resolve(orbDb);
     if (orbDbLoading) return orbDbLoading;
-    orbDbLoading = fetch("./riftbound-orb.json", { cache: "force-cache" })
+    // Cache-Bust via Query-String — Browser sieht "neue" Ressource
+    // wenn die ORB-DB neu deployed wurde
+    var url = "./riftbound-orb.json?v=20260630-orb";
+    orbDbLoading = fetch(url, { cache: "no-cache" })
       .then(function(r) {
         if (!r.ok) throw new Error("ORB-DB nicht verfügbar (HTTP " + r.status + ")");
         return r.json();
@@ -3283,8 +3288,25 @@
     };
 
     // Riftcodex-Kartenliste + ORB-Feature-DB im Hintergrund laden
+    var ocrStatus = document.getElementById("ocr-engine-status");
+    function updateEngineStatus() {
+      if (!ocrStatus) return;
+      var ocrPart = (typeof TextDetector !== "undefined") ? "TextDetector ✓"
+                   : (_ocrWorker) ? "Tesseract ✓"
+                   : (typeof Tesseract !== "undefined") ? "Tesseract lädt …" : "OCR fehlt";
+      var orbPart = orbDb ? "ORB ✓ (" + orbDb.cardIds.length + ")"
+                   : orbDbLoading ? "ORB lädt …"
+                   : "ORB fehlt";
+      var color = (orbDb && (_ocrWorker || typeof TextDetector !== "undefined")) ? "#6FCF8F"
+                 : (orbDbLoading) ? "#C9A24B" : "#E07070";
+      ocrStatus.textContent = "OCR: " + ocrPart + "  |  Bilderkennung: " + orbPart;
+      ocrStatus.style.color = color;
+    }
+    updateEngineStatus();
+
     loadRiftcodexCache().then(function() {
       showEmbedBuildBanner("Karten-Feature-DB wird geladen …", 0, 1);
+      updateEngineStatus();
       loadOrbDatabase().then(function(db) {
         hideEmbedBuildBanner();
         if (db) {
@@ -3292,19 +3314,12 @@
         } else {
           console.warn("[Setup] ORB-DB nicht verfügbar → nur OCR-Pfad nutzbar");
         }
+        updateEngineStatus();
       });
     });
-    // OCR-Engine vorwärmen (verhindert Verzögerung beim ersten Scan)
-    var ocrStatus = document.getElementById("ocr-engine-status");
-    if (typeof TextDetector !== "undefined") {
-      if (ocrStatus) { ocrStatus.textContent = "Nativer TextDetector verfügbar ✓"; ocrStatus.style.color = "#6FCF8F"; }
-    } else if (typeof Tesseract !== "undefined") {
-      if (ocrStatus) { ocrStatus.textContent = "Tesseract lädt …"; ocrStatus.style.color = "#C9A24B"; }
-      getOCRWorker().then(function() {
-        if (ocrStatus) { ocrStatus.textContent = "Tesseract bereit ✓"; ocrStatus.style.color = "#6FCF8F"; }
-      }).catch(function() {
-        if (ocrStatus) { ocrStatus.textContent = "Tesseract konnte nicht geladen werden"; ocrStatus.style.color = "#E07070"; }
-      });
+    // OCR-Engine vorwärmen
+    if (typeof Tesseract !== "undefined" && typeof TextDetector === "undefined") {
+      getOCRWorker().then(updateEngineStatus).catch(updateEngineStatus);
     }
 
     document.getElementById("live-scan-start-btn").onclick = startLiveScan;
