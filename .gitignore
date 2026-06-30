@@ -2,6 +2,11 @@
 build-tools/node_modules/
 build-tools/package-lock.json
 
+# Training-Caches (riesig, werden lokal regeneriert)
+training/card_cache/
+training/output/
+training/__pycache__/
+
 # OS / Editor Müll
 .DS_Store
 Thumbs.db

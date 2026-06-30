@@ -305,14 +305,10 @@
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <!-- TensorFlow.js + MobileNet v2 für Bilderkennung (Hauptweg seit v6). -->
 <!-- Wird einmalig (~14 MB) geladen, danach Browser-Cache. Liefert       -->
-<!-- 1280-dim Embeddings für jedes Bild → Cosine-Similarity-Vergleich    -->
-<!-- gegen vorberechnete Karten-Embeddings.                              -->
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.1/dist/mobilenet.min.js"></script>
-<!-- jsfeat für ORB-Feature-Matching (Hauptweg seit v7) -->
-<!-- ~150 KB, lokale Keypoints für robuste Karten-Identifikation auch -->
-<!-- bei Foils/Showcase/Epic-Layouts. Funktioniert wo MobileNet versagt. -->
-<script src="https://cdn.jsdelivr.net/npm/jsfeat@0.0.8/build/jsfeat-min.js"></script>
+<!-- onnxruntime-web für CNN-basierte Karten-Klassifikation (v8 — Hauptweg) -->
+<!-- Lädt das auf Riftbound-Karten trainierte MobileNetV3-Small-Modell.   -->
+<!-- ~3 MB Library + ~10 MB Modell, beides nach erstem Laden gecached.   -->
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
 </head>
 <body>
 
@@ -1229,7 +1225,157 @@
   window.exportEmbedDb = exportEmbedDb;
 
   // ============================================================
-  // ORB FEATURE-MATCHING (jsfeat) — Hauptweg seit v7
+  // CNN-KLASSIFIKATION (MobileNetV3-Small custom-trained) — Hauptweg seit v8
+  // ============================================================
+  // Auf RTX 3080 mit 800k+ augmentierten Bildern trainiertes Modell.
+  // Output: pro Klasse Probability (1064 Klassen). Top-1 ist Vorschlag.
+  // Threshold: Top-1 > 0.5 → akzeptiert. Sonst OCR-Fallback.
+
+  var CNN_INPUT_SIZE = 224;
+  var CNN_MEAN = [0.485, 0.456, 0.406];
+  var CNN_STD  = [0.229, 0.224, 0.225];
+  var CNN_ACCEPT_PROB = 0.50;   // Top-1 muss >= 50% Confidence haben
+  var CNN_ACCEPT_MARGIN = 0.15; // Top-1 muss >= 15% Punkte vor Top-2 liegen
+
+  var cnnSession = null;
+  var cnnMeta = null;
+  var cnnLoading = null;
+
+  // Modell + Metadaten laden
+  function loadCnnModel() {
+    if (cnnSession && cnnMeta) return Promise.resolve({ session: cnnSession, meta: cnnMeta });
+    if (cnnLoading) return cnnLoading;
+    if (typeof ort === "undefined") {
+      return Promise.reject(new Error("onnxruntime-web nicht geladen"));
+    }
+    console.log("[CNN] Lade Modell + Metadaten ...");
+    var t0 = performance.now();
+    var modelUrl = "./riftbound-model.onnx?v=v8-20260630";
+    var metaUrl  = "./riftbound-model-meta.json?v=v8-20260630";
+    cnnLoading = Promise.all([
+      ort.InferenceSession.create(modelUrl, {
+        executionProviders: ["wasm"],   // WASM überall verfügbar, WebGL fallback
+        graphOptimizationLevel: "all"
+      }),
+      fetch(metaUrl, { cache: "no-cache" }).then(function(r) {
+        if (!r.ok) throw new Error("Meta HTTP " + r.status);
+        return r.json();
+      })
+    ]).then(function(arr) {
+      cnnSession = arr[0];
+      cnnMeta = arr[1];
+      var dt = Math.round(performance.now() - t0);
+      console.log("[CNN] geladen in " + dt + "ms — " + cnnMeta.cardIds.length + " Klassen, val_acc " +
+                  (cnnMeta.val_acc * 100).toFixed(1) + "%");
+      cnnLoading = null;
+      return { session: cnnSession, meta: cnnMeta };
+    }).catch(function(err) {
+      console.error("[CNN] Lade-Fehler:", err.message || err);
+      cnnLoading = null;
+      throw err;
+    });
+    return cnnLoading;
+  }
+
+  // Canvas (RGB) → preprocessed Tensor für MobileNetV3
+  // Output: Float32Array Shape [1, 3, 224, 224], CHW Layout, normalisiert
+  function canvasToCnnTensor(canvas) {
+    // Auf 224x224 resizen
+    var off = document.createElement("canvas");
+    off.width = CNN_INPUT_SIZE; off.height = CNN_INPUT_SIZE;
+    var ctx = off.getContext("2d");
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(canvas, 0, 0, CNN_INPUT_SIZE, CNN_INPUT_SIZE);
+    var data = ctx.getImageData(0, 0, CNN_INPUT_SIZE, CNN_INPUT_SIZE).data;
+
+    // RGBA Uint8 → CHW Float32 normalisiert
+    var N = CNN_INPUT_SIZE * CNN_INPUT_SIZE;
+    var out = new Float32Array(3 * N);
+    var r = CNN_MEAN[0], g = CNN_MEAN[1], b = CNN_MEAN[2];
+    var sr = CNN_STD[0], sg = CNN_STD[1], sb = CNN_STD[2];
+    for (var i = 0, p = 0; i < data.length; i += 4, p++) {
+      out[0 * N + p] = (data[i]     / 255 - r) / sr;
+      out[1 * N + p] = (data[i + 1] / 255 - g) / sg;
+      out[2 * N + p] = (data[i + 2] / 255 - b) / sb;
+    }
+    return new ort.Tensor("float32", out, [1, 3, CNN_INPUT_SIZE, CNN_INPUT_SIZE]);
+  }
+
+  // Softmax über Logits → Probabilities
+  function softmax(logits) {
+    var m = -Infinity;
+    for (var i = 0; i < logits.length; i++) if (logits[i] > m) m = logits[i];
+    var sum = 0;
+    var probs = new Float32Array(logits.length);
+    for (var i = 0; i < logits.length; i++) { probs[i] = Math.exp(logits[i] - m); sum += probs[i]; }
+    for (var i = 0; i < logits.length; i++) probs[i] /= sum;
+    return probs;
+  }
+
+  // Klassifiziert ein Canvas. Liefert { top3, bestProb, secondProb, margin, time }
+  function classifyWithCnn(canvas) {
+    if (!cnnSession || !cnnMeta) return Promise.reject(new Error("CNN nicht geladen"));
+    var t0 = performance.now();
+    var tensor = canvasToCnnTensor(canvas);
+    var t1 = performance.now();
+    return cnnSession.run({ input: tensor }).then(function(out) {
+      var t2 = performance.now();
+      var logits = out.logits.data;
+      var probs = softmax(logits);
+      // Top-3 finden
+      var indices = new Int32Array(probs.length);
+      for (var i = 0; i < probs.length; i++) indices[i] = i;
+      var sortedIdx = Array.from(indices).sort(function(a, b) { return probs[b] - probs[a]; });
+      var top3 = sortedIdx.slice(0, 3).map(function(idx) {
+        var cardId = cnnMeta.cardIds[idx];
+        var card = (riftcodexCache || []).filter(function(c) { return c.riftcodexId === cardId; })[0];
+        return { card: card, idx: idx, prob: probs[idx], name: cnnMeta.cardNames[idx] };
+      });
+      var bestProb   = top3[0] ? top3[0].prob : 0;
+      var secondProb = top3[1] ? top3[1].prob : 0;
+      return {
+        top3: top3,
+        bestCard: top3[0] ? top3[0].card : null,
+        bestProb: bestProb,
+        secondProb: secondProb,
+        margin: bestProb - secondProb,
+        timing: { preprocess: Math.round(t1 - t0), inference: Math.round(t2 - t1) }
+      };
+    });
+  }
+
+  // CNN-Match → Karte zur Queue
+  function finalizeCnnMatch(canvas, match) {
+    var card = match.bestCard;
+    if (!card) {
+      console.warn("[CNN] Match hat keine card-Referenz für ID " + cnnMeta.cardIds[match.top3[0].idx]);
+      liveBusy = false;
+      return;
+    }
+    var label = (card.set || "?") + " · " + (card.name || card.number || "?");
+    setLiveStatusPill("Erkannt: " + label, true);
+    updateScanDiag(null,
+      "CNN-Match: " + label + "\n" +
+      "Confidence " + (match.bestProb * 100).toFixed(1) + "%  |  Margin " +
+      (match.margin * 100).toFixed(1) + "%",
+      "ok");
+    return new Promise(function(resolve) {
+      canvas.toBlob(function(blob) {
+        if (!blob) { liveBusy = false; resolve(); return; }
+        var file = new File([blob], "live-" + Date.now() + ".jpg", { type: "image/jpeg" });
+        addToQueue(file, {
+          number: card.number,
+          setCode: card.setId,
+          matchedCard: card
+        });
+        resolve();
+      }, "image/jpeg", 0.92);
+    });
+  }
+
+  // ============================================================
+  // ALTE BILDERKENNUNGSVERSUCHE (NICHT MEHR AKTIV — nur für Doku/History)
   // ============================================================
   // Statt globaler Embeddings (MobileNet) extrahieren wir lokale Keypoints
   // (markante Stellen im Artwork: Ecken, Texturen, Augen). Jede Karte hat
@@ -2581,75 +2727,69 @@
     });
   }
 
-  // STRATEGIE-WECHSEL: OCR ist jetzt Primär-Erkennung, Bild-Match nur noch
-  // als Backup wenn OCR komplett nichts lesen kann.
-  //
-  // Grund: Bilderkennung halluziniert zu oft falsche Matches. OCR liest die
-  // tatsächlich aufgedruckte Karten-Nummer — wenn die da ist, ist sie wahr.
-  // Image-Match nur noch bei OCR-Totalausfall (kein Text gefunden).
+  // v8 Pipeline: CNN-Klassifikation primär, OCR als Fallback wenn CNN unsicher.
+  // CNN ist auf alle 1064 Riftbound-Karten trainiert (custom MobileNetV3-Small,
+  // 800k+ augmentierte Trainingsbilder, val_acc 88%+).
   function runScanOnCanvas() {
     var canvas = document.getElementById("live-canvas");
 
-    // PRIORITÄT 1: ORB-Feature-Matching (Hauptweg).
-    // Wenn ORB-DB geladen ist, probieren wir ORB zuerst. Bei klarem Match
-    // (score >= 30 UND margin >= 12) wird die Karte sofort übernommen.
-    // Bei unklarem ORB-Ergebnis → OCR als Fallback.
-    if (orbDb && typeof jsfeat !== "undefined") {
+    // PRIORITÄT 1: CNN-Klassifikation
+    if (cnnSession && cnnMeta) {
       try {
-        var t0 = performance.now();
         var cardCrop = cropGuideBoxArea(canvas);
-        var orbQuery = extractOrbFromCanvas(cardCrop, ORB_QUERY_MAX_KP);
-        var t1 = performance.now();
+        return classifyWithCnn(cardCrop).then(function(match) {
+          var top3str = match.top3.map(function(c) {
+            return c.name + " (" + (c.prob * 100).toFixed(1) + "%)";
+          }).join(", ");
+          console.log("[CNN] preprocess=" + match.timing.preprocess + "ms" +
+                      " inference=" + match.timing.inference + "ms" +
+                      " | Top-3: " + top3str);
 
-        if (orbQuery && orbQuery.count >= 10) {
-          var match = matchOrbAgainstDb(orbQuery);
-          var t2 = performance.now();
-
-          if (match) {
-            var top3str = match.top3.map(function(c) {
-              return (c.card ? c.card.name : "?") + " (" + c.score + ")";
-            }).join(", ");
-            console.log("[ORB-Match] Query=" + orbQuery.count + "kp" +
-                        " extract=" + Math.round(t1 - t0) + "ms" +
-                        " match=" + Math.round(t2 - t1) + "ms" +
-                        " best=" + match.bestScore + " margin=" + match.margin +
-                        " | Top-3: " + top3str);
-
-            var passesHard = match.bestScore >= ORB_MIN_SCORE && match.margin >= ORB_MIN_MARGIN;
-            if (passesHard) {
-              console.log("[Vergleich] ORB=" + (match.bestCard ? match.bestCard.name : "?") +
-                          " (score " + match.bestScore + ", margin " + match.margin + ")" +
-                          " | OCR=ÜBERSPRUNGEN (ORB hat Wahrheit) | Entscheidung=ORB-PFAD");
-              return finalizeOrbMatch(canvas, match);
-            }
-            // ORB nicht konfident → OCR-Fallback wird gleich versucht
-            console.log("[ORB] Unklarer Match (score " + match.bestScore +
-                        ", margin " + match.margin + ") → OCR-Fallback");
+          var passes = match.bestProb >= CNN_ACCEPT_PROB && match.margin >= CNN_ACCEPT_MARGIN;
+          if (passes) {
+            console.log("[Vergleich] CNN=" + (match.bestCard ? match.bestCard.name : "?") +
+                        " (" + (match.bestProb * 100).toFixed(1) + "%, margin " +
+                        (match.margin * 100).toFixed(1) + "%) | OCR=ÜBERSPRUNGEN | CNN-PFAD");
+            return finalizeCnnMatch(canvas, match);
           }
-        } else {
-          var kpCount = orbQuery ? orbQuery.count : 0;
-          console.log("[ORB] zu wenig Keypoints (" + kpCount + ") → OCR-Fallback");
-        }
+          console.log("[CNN] Unklar (best=" + (match.bestProb * 100).toFixed(1) +
+                      "%, margin=" + (match.margin * 100).toFixed(1) + "%) → OCR-Fallback");
+          return runOcrFallback(canvas, match);
+        }).catch(function(err) {
+          console.warn("[CNN] Inferenz-Fehler:", err.message || err);
+          return runOcrFallback(canvas, null);
+        });
       } catch (e) {
-        console.warn("[ORB] Fehler — versuche OCR:", e);
+        console.warn("[CNN] Setup-Fehler:", e);
+        return runOcrFallback(canvas, null);
       }
     }
 
-    // PRIORITÄT 2: OCR als Fallback (oder Primär wenn ORB-DB fehlt)
+    // CNN noch nicht bereit → direkt OCR
+    return runOcrFallback(canvas, null);
+  }
+
+  function runOcrFallback(canvas, cnnMatchInfo) {
     return findCardNumber(canvas).then(function(info) {
       if (info && info.number) {
         console.log("[Vergleich] OCR=" + info.number +
                     (info.setCode ? " (" + info.setCode + ")" : "") +
-                    " | Entscheidung=OCR-PFAD (ORB-Fallback)");
+                    " | Entscheidung=OCR-PFAD");
         return processOcrConfirmedInfo(canvas, info);
       }
-
-      // Beide Wege haben nichts gefunden → ehrlicher Reject
-      console.log("[Vergleich] ORB=unsicher | OCR=null | Entscheidung=REJECT");
+      // Beide Wege haben nichts → Reject
+      var cnnInfo = cnnMatchInfo ?
+        "CNN-Top: " + cnnMatchInfo.top3[0].name + " (" + (cnnMatchInfo.bestProb * 100).toFixed(1) + "%)" :
+        "CNN: nicht bereit";
+      console.log("[Vergleich] " + cnnInfo + " | OCR=null | Entscheidung=REJECT");
       setLiveStatusPill("Karte nicht erkannt — anders halten", false);
       var pending = getMostPromisingPending();
       var diagText = "ABGELEHNT\n" +
-                     "ORB: kein klarer Treffer\n" +
+                     (cnnMatchInfo ?
+                       "CNN-Top-3:\n" + cnnMatchInfo.top3.map(function(c) {
+                         return "  " + c.name + " (" + (c.prob * 100).toFixed(1) + "%)";
+                       }).join("\n") :
+                       "CNN noch nicht geladen") + "\n" +
                      "OCR: keine Nummer gelesen";
       if (pending) diagText += "\nBuffer: " + pending.label + " (" + pending.count + "/" + REQUIRED_AGREEMENT + ")";
       updateScanDiag(null, diagText, "warn");
@@ -2657,34 +2797,6 @@
     }).catch(function(err) {
       console.warn("[Scan] Fehler:", err);
       liveBusy = false;
-    });
-  }
-
-  // ORB-Match → Karte zur Queue
-  function finalizeOrbMatch(canvas, match) {
-    var card = match.bestCard;
-    if (!card) {
-      console.warn("[ORB] Match hat keine card-Referenz");
-      liveBusy = false;
-      return;
-    }
-    var label = (card.set || "?") + " · " + (card.name || card.number || "?");
-    setLiveStatusPill("Erkannt: " + label, true);
-    updateScanDiag(null,
-      "ORB-Match: " + label + "\n" +
-      "Score " + match.bestScore + " | Margin " + match.margin + " | sicher",
-      "ok");
-    return new Promise(function(resolve) {
-      canvas.toBlob(function(blob) {
-        if (!blob) { liveBusy = false; resolve(); return; }
-        var file = new File([blob], "live-" + Date.now() + ".jpg", { type: "image/jpeg" });
-        addToQueue(file, {
-          number: card.number,
-          setCode: card.setId,
-          matchedCard: card
-        });
-        resolve();
-      }, "image/jpeg", 0.92);
     });
   }
 
@@ -3310,33 +3422,33 @@
       document.getElementById("api-key-overlay").classList.remove("hidden");
     };
 
-    // Riftcodex-Kartenliste + ORB-Feature-DB im Hintergrund laden
+    // Riftcodex-Kartenliste + CNN-Modell (ONNX) im Hintergrund laden
     var ocrStatus = document.getElementById("ocr-engine-status");
     function updateEngineStatus() {
       if (!ocrStatus) return;
       var ocrPart = (typeof TextDetector !== "undefined") ? "TextDetector ✓"
                    : (_ocrWorker) ? "Tesseract ✓"
                    : (typeof Tesseract !== "undefined") ? "Tesseract lädt …" : "OCR fehlt";
-      var orbPart = orbDb ? "ORB ✓ (" + orbDb.cardIds.length + ")"
-                   : orbDbLoading ? "ORB lädt …"
-                   : "ORB fehlt";
-      var color = (orbDb && (_ocrWorker || typeof TextDetector !== "undefined")) ? "#6FCF8F"
-                 : (orbDbLoading) ? "#C9A24B" : "#E07070";
-      ocrStatus.textContent = "OCR: " + ocrPart + "  |  Bilderkennung: " + orbPart;
+      var cnnPart = cnnSession ? "CNN ✓ (" + (cnnMeta ? cnnMeta.cardIds.length : "?") + ")"
+                   : cnnLoading ? "CNN lädt …"
+                   : "CNN fehlt";
+      var color = (cnnSession && (_ocrWorker || typeof TextDetector !== "undefined")) ? "#6FCF8F"
+                 : cnnLoading ? "#C9A24B" : "#E07070";
+      ocrStatus.textContent = "OCR: " + ocrPart + "  |  Bilderkennung: " + cnnPart;
       ocrStatus.style.color = color;
     }
     updateEngineStatus();
 
     loadRiftcodexCache().then(function() {
-      showEmbedBuildBanner("Karten-Feature-DB wird geladen …", 0, 1);
+      showEmbedBuildBanner("CNN-Modell wird geladen …", 0, 1);
       updateEngineStatus();
-      loadOrbDatabase().then(function(db) {
+      loadCnnModel().then(function(res) {
         hideEmbedBuildBanner();
-        if (db) {
-          console.log("[Setup] ORB-Bilderkennung bereit:", db.cardIds.length, "Karten");
-        } else {
-          console.warn("[Setup] ORB-DB nicht verfügbar → nur OCR-Pfad nutzbar");
-        }
+        console.log("[Setup] CNN-Bilderkennung bereit:", res.meta.cardIds.length, "Karten");
+        updateEngineStatus();
+      }).catch(function(err) {
+        hideEmbedBuildBanner();
+        console.warn("[Setup] CNN nicht verfügbar → nur OCR-Pfad nutzbar:", err.message);
         updateEngineStatus();
       });
     });
