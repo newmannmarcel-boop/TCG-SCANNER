@@ -2232,10 +2232,13 @@
   // User-Feedback Iteration 2: Vault Breaker rutscht trotz Penalty
   // 0.15 durch (rawSim 0.38-0.40, adjSim 0.30-0.35 → bestätigt fälschlich).
   // Lösung: aggressiverer Hub-Filter + höhere Schwelle.
-  var EMB_MATCH_STRONG = 0.35;        // RAUF von 0.30 — Vault Breaker dropt drunter
-  var EMB_MATCH_MEDIUM = 0.22;
-  var EMB_MIN_MARGIN_STRONG = 0.05;
-  var EMB_MIN_MARGIN_MEDIUM = 0.03;
+  // Harte Schwelle. UNTER diesem Wert wird KEINE Karte mehr akzeptiert,
+  // egal wie nah sie an der Best-Position ist. Lieber gar kein Treffer
+  // als ein halluzinierter Vault Breaker.
+  var EMB_MATCH_STRONG = 0.45;
+  var EMB_MATCH_MEDIUM = 0.45;        // identisch — kein Medium-Pfad mehr
+  var EMB_MIN_MARGIN_STRONG = 0.08;   // RAUF — Margin muss deutlich sein
+  var EMB_MIN_MARGIN_MEDIUM = 0.08;
   // Maximale Hub-Penalty — auf Top-Hubs deutlich erhöht.
   var HUB_ALPHA = 0.30;
   // Session-Penalty: wenn eine Karte mehr als N mal in Folge "gewinnt",
@@ -2321,49 +2324,60 @@
   function runScanOnCanvas() {
     var canvas = document.getElementById("live-canvas");
 
-    // Schritt 1: OCR versuchen. Liefert Promise<info|null>
     return findCardNumber(canvas).then(function(info) {
       if (info && info.number) {
-        // OCR hat eine Nummer gelesen → Wahrheit, Bild-Match ignorieren
-        console.log("[Scan-Pfad] OCR gewinnt — gelesen:", info.number,
-                    info.setCode ? "Set " + info.setCode : "(ohne Set-Code)");
+        // OCR-Pfad — Bild wird gar nicht erst befragt
+        console.log("[Vergleich] OCR=" + info.number +
+                    (info.setCode ? " (" + info.setCode + ")" : "") +
+                    " | Bild=IGNORIERT (OCR hat Wahrheit) | Entscheidung=OCR-PFAD");
         return processOcrConfirmedInfo(canvas, info);
       }
 
-      // Schritt 2: OCR fand nichts. Versuche Bild-Match als Backup.
+      // OCR fand nichts → Bild-Match als BACKUP, aber mit HARTER Schwelle
       if (embedModel && embedDb && embedDb.cardIds.length > 0) {
-        console.log("[Scan-Pfad] OCR fand keine Nummer → Bild-Match als Backup");
         return findBestMatchAcrossCrops(canvas).then(function(match) {
+          var bildText, sim = 0, margin = 0;
           if (match && match.candidates && match.candidates.length > 0) {
-            var top = match.candidates.slice(0, 3).map(function(c) {
-              return (c.card.set || "?") + " " + (c.card.name || c.card.number || "?") +
-                     " (raw " + c.similarity.toFixed(3) + " adj " + (c.adjustedSimilarity || c.similarity).toFixed(3) + ")";
-            }).join("\n  ");
-            console.log("[Bild-Backup] Crop=" + match.cropUsed +
-                        " adjSim=" + match.bestSimilarity.toFixed(3) +
-                        " margin=" + (match.margin || 0).toFixed(3) +
-                        " hub(count=" + (match.hubCountOfBest || 0) +
-                        ", rank=" + (match.hubRankOfBest != null ? match.hubRankOfBest : "?") + ")" +
-                        " Top-3:\n  " + top);
+            sim = match.bestSimilarity;
+            margin = match.margin || 0;
+            var lead = match.candidates[0].card;
+            bildText = (lead.name || lead.number || "?") +
+                       " (adjSim " + sim.toFixed(3) + ", margin " + margin.toFixed(3) +
+                       ", hub-rank " + (match.hubRankOfBest != null ? match.hubRankOfBest : "?") + ")";
+          } else {
+            bildText = "NULL (kein Kandidat)";
           }
-          var sim = match ? match.similarity : 0;
-          var margin = match ? (match.margin || 0) : 0;
-          // STRENGE Backup-Schwellen — nur sehr klare Bild-Matches durchlassen
-          // (auch dann nur als "wahrscheinlich" markieren, nicht als sicher)
-          var isStrong = match && sim >= EMB_MATCH_STRONG && margin >= EMB_MIN_MARGIN_STRONG;
-          if (isStrong) {
-            console.log("[Scan-Pfad] Bild-Backup akzeptiert (sehr klarer Match)");
-            match.isStrong = isStrong;
+
+          // HARTE Schwelle — UNDER dem Wert ist es ABGELEHNT, egal wie nah
+          var passesHard = match && sim >= EMB_MATCH_STRONG && margin >= EMB_MIN_MARGIN_STRONG;
+          var grund;
+          if (!match) {
+            grund = "kein Embedding berechnet";
+          } else if (sim < EMB_MATCH_STRONG) {
+            grund = "adjSim " + sim.toFixed(3) + " UNTER Schwelle " + EMB_MATCH_STRONG +
+                    " → Karte wird IGNORIERT, NICHT zur Queue hinzugefügt";
+          } else if (margin < EMB_MIN_MARGIN_STRONG) {
+            grund = "Margin " + margin.toFixed(3) + " UNTER " + EMB_MIN_MARGIN_STRONG +
+                    " → zu wenig Abstand zum 2. Platz, IGNORIERT";
+          } else {
+            grund = "AKZEPTIERT (sim >= " + EMB_MATCH_STRONG + " UND margin >= " + EMB_MIN_MARGIN_STRONG + ")";
+          }
+          console.log("[Vergleich] OCR=null | Bild=" + bildText + " | Entscheidung=" +
+                      (passesHard ? "BILD-PFAD" : "REJECT") + " | Grund: " + grund);
+
+          if (passesHard) {
+            match.isStrong = true;
             return handleEmbeddingMatch(canvas, match);
           }
-          // Weder OCR noch klares Bild → ehrlich melden, Frame verwerfen
-          console.log("[Scan-Pfad] Beide Wege unsicher → nichts übernommen");
+
+          // ABGELEHNT — explizit nichts zur Queue hinzufügen, Frame verwerfen
           setLiveStatusPill("Karte nicht erkannt — anders halten", false);
           updateScanDiag(null,
+            "ABGELEHNT\n" +
             "OCR: keine Nummer im Bild.\n" +
-            "Bild-Backup: zu unsicher (adjSim " + sim.toFixed(3) + ", Margin " + margin.toFixed(3) + ").\n" +
-            "Karte neu positionieren oder manuell eintragen.",
-            "warn");
+            "Bild: " + bildText + "\n" +
+            "Grund: " + grund,
+            "err");
           liveBusy = false;
         }).catch(function(err) {
           console.warn("[Bild-Backup] Fehler:", err);
@@ -2373,7 +2387,7 @@
       }
 
       // Kein Modell verfügbar UND kein OCR-Treffer
-      console.log("[Scan-Pfad] OCR fand nichts, kein Bild-Modell verfügbar");
+      console.log("[Vergleich] OCR=null | Bild=Modell nicht geladen | Entscheidung=REJECT");
       setLiveStatusPill("Karte nicht erkannt", false);
       var pending = getMostPromisingPending();
       updateScanDiag(null,
