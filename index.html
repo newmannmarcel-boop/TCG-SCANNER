@@ -305,14 +305,10 @@
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <!-- TensorFlow.js + MobileNet v2 für Bilderkennung (Hauptweg seit v6). -->
 <!-- Wird einmalig (~14 MB) geladen, danach Browser-Cache. Liefert       -->
-<!-- 1280-dim Embeddings für jedes Bild → Cosine-Similarity-Vergleich    -->
-<!-- gegen vorberechnete Karten-Embeddings.                              -->
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.1/dist/mobilenet.min.js"></script>
-<!-- jsfeat für ORB-Feature-Matching (Hauptweg seit v7) -->
-<!-- ~150 KB, lokale Keypoints für robuste Karten-Identifikation auch -->
-<!-- bei Foils/Showcase/Epic-Layouts. Funktioniert wo MobileNet versagt. -->
-<script src="https://cdn.jsdelivr.net/npm/jsfeat@0.0.8/build/jsfeat-min.js"></script>
+<!-- onnxruntime-web für CNN-basierte Karten-Klassifikation (v8 — Hauptweg) -->
+<!-- Lädt das auf Riftbound-Karten trainierte MobileNetV3-Small-Modell.   -->
+<!-- ~3 MB Library + ~10 MB Modell, beides nach erstem Laden gecached.   -->
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
 </head>
 <body>
 
