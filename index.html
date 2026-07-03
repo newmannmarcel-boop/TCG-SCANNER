@@ -378,7 +378,7 @@
     </div>
     <div id="live-scan-diag" class="live-scan-diag hidden"></div>
     <div id="embed-debug-panel" class="embed-debug-panel">
-      <div class="edp-title">DEBUG: was MobileNet sieht</div>
+      <div class="edp-title">DEBUG: was das CNN sieht</div>
       <div class="edp-row">
         <canvas id="edp-canvas" width="80" height="112"></canvas>
         <div class="edp-stats" id="edp-stats">noch kein Scan</div>
@@ -1234,8 +1234,12 @@
   var CNN_INPUT_SIZE = 224;
   var CNN_MEAN = [0.485, 0.456, 0.406];
   var CNN_STD  = [0.229, 0.224, 0.225];
-  var CNN_ACCEPT_PROB = 0.50;   // Top-1 muss >= 50% Confidence haben
-  var CNN_ACCEPT_MARGIN = 0.15; // Top-1 muss >= 15% Punkte vor Top-2 liegen
+  // Kalibriert an echten User-Test-Daten (Sentinel Adept, Detonate, Recurve Bow etc.):
+  // Modell ist bei richtigen Karten mit 15-90% Confidence korrekt.
+  // Margin zu falschen Alternativen ist ausnahmslos >10%.
+  // Also: relativ niedriger Absolut-Threshold + strenger Margin-Check.
+  var CNN_ACCEPT_PROB = 0.15;   // Top-1 muss >= 15% Confidence haben
+  var CNN_ACCEPT_MARGIN = 0.10; // Top-1 muss >= 10% Punkte vor Top-2 liegen
 
   var cnnSession = null;
   var cnnMeta = null;
@@ -1323,14 +1327,45 @@
       var t2 = performance.now();
       var logits = out.logits.data;
       var probs = softmax(logits);
-      // Top-3 finden
+
+      // Alle Klassen sortiert nach Prob absteigend
       var indices = new Int32Array(probs.length);
       for (var i = 0; i < probs.length; i++) indices[i] = i;
       var sortedIdx = Array.from(indices).sort(function(a, b) { return probs[b] - probs[a]; });
-      var top3 = sortedIdx.slice(0, 3).map(function(idx) {
-        var cardId = cnnMeta.cardIds[idx];
+
+      // WICHTIG: Riftcodex hat mehrere Einträge mit gleichem Karten-Namen
+      // (z.B. Serrated Dirk als Common + Promo + Alt-Art). Alle zeigen dasselbe
+      // Bild, also SUMMIEREN wir die Wahrscheinlichkeiten pro Karten-NAME.
+      // Damit ist "Serrated Dirk 50% + Serrated Dirk 5%" ein 55%-Match, nicht
+      // ein 50%-Match mit 5%-Konkurrenz.
+      var byName = {}; // name -> { totalProb, firstIdx (mit höchster prob) }
+      for (var k = 0; k < sortedIdx.length; k++) {
+        var idx = sortedIdx[k];
+        var name = cnnMeta.cardNames[idx];
+        if (!byName[name]) {
+          byName[name] = { totalProb: 0, firstIdx: idx, indices: [] };
+        }
+        byName[name].totalProb += probs[idx];
+        byName[name].indices.push(idx);
+      }
+      // Sortiere Namen nach totalProb absteigend
+      var nameGroups = Object.keys(byName).map(function(name) {
+        return { name: name, totalProb: byName[name].totalProb,
+                 firstIdx: byName[name].firstIdx, indices: byName[name].indices };
+      }).sort(function(a, b) { return b.totalProb - a.totalProb; });
+
+      // Top-3 nach GRUPPIERTEM totalProb
+      var top3 = nameGroups.slice(0, 3).map(function(g) {
+        var cardId = cnnMeta.cardIds[g.firstIdx];
         var card = (riftcodexCache || []).filter(function(c) { return c.riftcodexId === cardId; })[0];
-        return { card: card, idx: idx, prob: probs[idx], name: cnnMeta.cardNames[idx] };
+        return {
+          card: card,
+          idx: g.firstIdx,
+          prob: g.totalProb,          // gruppierte Summe für Anzeige
+          name: g.name,
+          variantCount: g.indices.length,
+          allCardIds: g.indices.map(function(i) { return cnnMeta.cardIds[i]; })
+        };
       });
       var bestProb   = top3[0] ? top3[0].prob : 0;
       var secondProb = top3[1] ? top3[1].prob : 0;
