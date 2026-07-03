@@ -1254,8 +1254,8 @@
     }
     console.log("[CNN] Lade Modell + Metadaten ...");
     var t0 = performance.now();
-    var modelUrl = "./riftbound-model.onnx?v=v8-20260630";
-    var metaUrl  = "./riftbound-model-meta.json?v=v8-20260630";
+    var modelUrl = "./riftbound-model.onnx?v=v8-finetuned-20260703";
+    var metaUrl  = "./riftbound-model-meta.json?v=v8-finetuned-20260703";
     cnnLoading = Promise.all([
       ort.InferenceSession.create(modelUrl, {
         executionProviders: ["wasm"],   // WASM überall verfügbar, WebGL fallback
