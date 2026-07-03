@@ -545,7 +545,7 @@
 
   var riftcodexCache = null;
   var riftcodexCachePromise = null;
-  var STORAGE_KEY_RCACHE = "kartenkammer_riftcodex_v4";
+  var STORAGE_KEY_RCACHE = "kartenkammer_riftcodex_v5"; // v5: Varianten-Flags aus Namens-Suffix
 
   var _ocrWorker = null; // Tesseract-Worker (wird beim ersten Scan geladen)
 
@@ -1380,7 +1380,16 @@
     });
   }
 
-  // CNN-Match → Karte zur Queue
+  // CNN-Match → Karte(n) zur Queue.
+  // WICHTIG: Wir übergeben ALLE Varianten der erkannten Namensgruppe als
+  // matchedCandidates (nicht nur eine Karte). Karten mit identischem Namen/
+  // Artwork existieren mehrfach (Common + Promo + Overnumbered). Das CNN kann
+  // die nicht unterscheiden — aber die Filter-Logik in addToQueue kann es:
+  //   - Promo-Filter aktiv → Promo-Version wird gewählt
+  //   - kein Filter → Basiskarten-Fallback wählt die normale Version
+  //   - mehrere Kandidaten übrig → User bekommt Auswahl
+  // Vorher (Bug): matchedCard übergab stumpf die Variante mit höchster
+  // Einzel-Probability → oft die falsche (z.B. immer OPP-Promo statt SFD).
   function finalizeCnnMatch(canvas, match) {
     var card = match.bestCard;
     if (!card) {
@@ -1388,7 +1397,15 @@
       liveBusy = false;
       return;
     }
-    var label = (card.set || "?") + " · " + (card.name || card.number || "?");
+    // Alle Karten der Top-Namensgruppe aus dem Cache auflösen
+    var groupIds = (match.top3[0] && match.top3[0].allCardIds) || [card.riftcodexId];
+    var candidates = groupIds.map(function(id) {
+      return (riftcodexCache || []).filter(function(c) { return c.riftcodexId === id; })[0];
+    }).filter(function(c) { return !!c; });
+    if (candidates.length === 0) candidates = [card];
+
+    var label = (card.set || "?") + " · " + (card.name || card.number || "?") +
+                (candidates.length > 1 ? " (" + candidates.length + " Varianten)" : "");
     setLiveStatusPill("Erkannt: " + label, true);
     updateScanDiag(null,
       "CNN-Match: " + label + "\n" +
@@ -1402,7 +1419,7 @@
         addToQueue(file, {
           number: card.number,
           setCode: card.setId,
-          matchedCard: card
+          matchedCandidates: candidates
         });
         resolve();
       }, "image/jpeg", 0.92);
@@ -2051,6 +2068,13 @@
     var hasLetterSuffix = /^[a-z]+-\d+[a-z]+-\d+$/i.test(num) ||  // "uni-060aa-219"
                           /^[a-z]+-\d+[a-z]-\d+$/i.test(num);      // "uni-060a-219"
     var hasOvernumberedMark = num.indexOf("*") !== -1;
+    // Riftcodex codiert Varianten zusätzlich im NAMEN: "Jax (Alternate Art)",
+    // "Soraka (Overnumbered)", "Aphelios (Signature)" — zuverlässigstes Signal,
+    // weil metadata-Flags oft nicht gepflegt sind.
+    var nameLower = (card.name || "").toLowerCase();
+    var nameAltArt = nameLower.indexOf("(alternate art)") !== -1;
+    var nameOvernum = nameLower.indexOf("(overnumbered)") !== -1;
+    var nameSignature = nameLower.indexOf("(signature)") !== -1;
     return {
       riftcodexId: card.id,
       name: card.name,
@@ -2060,9 +2084,9 @@
       rarity: (card.classification && card.classification.rarity) || "",
       imageUrl: (card.media && card.media.image_url) || "",
       isPromo: !!(card.set && card.set.set_id === "OPP"),
-      isAltArt: !!(card.metadata && card.metadata.alternate_art) || hasLetterSuffix,
-      isOvernumbered: !!(card.metadata && card.metadata.overnumbered) || hasOvernumberedMark,
-      isSignature: !!(card.metadata && card.metadata.signature)
+      isAltArt: !!(card.metadata && card.metadata.alternate_art) || hasLetterSuffix || nameAltArt,
+      isOvernumbered: !!(card.metadata && card.metadata.overnumbered) || hasOvernumberedMark || nameOvernum,
+      isSignature: !!(card.metadata && card.metadata.signature) || nameSignature
     };
   }
 
@@ -2772,6 +2796,9 @@
     if (cnnSession && cnnMeta) {
       try {
         var cardCrop = cropGuideBoxArea(canvas);
+        _scanCounter++;
+        // Debug-Panel: exakt der Crop den das CNN als Input bekommt
+        try { debugShowEmbedInput(cardCrop, "guide", null, _scanCounter, false); } catch (e) {}
         return classifyWithCnn(cardCrop).then(function(match) {
           var top3str = match.top3.map(function(c) {
             return c.name + " (" + (c.prob * 100).toFixed(1) + "%)";
