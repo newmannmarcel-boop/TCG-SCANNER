@@ -1,0 +1,236 @@
+"""
+Phone-Realistic Fine-Tuning: baut auf best_model.pth auf und trainiert mit
+deutlich staerkerer, handy-realistischer Augmentation weiter.
+
+Neu ggue. resume_train.py:
+  - phone_aug-Pipeline (JPEG-Artefakte, Sensor-Rauschen, Weissabgleich,
+    Beleuchtungs-Gradienten, gerichteter Foil-Glanz, Motion-Blur,
+    chromatische Aberration)
+  - ZWEI Validierungs-Metriken pro Epoch:
+      val_clean  = auf sauberen Studio-Bildern (wie bisher, Vergleichbarkeit)
+      val_phone  = auf handy-augmentierten Bildern (der EIGENTLICHE Zielwert)
+  - Best-Model wird nach val_phone ausgewaehlt (nicht val_clean)
+  - Checkpoint alle 5 Epochs
+"""
+import os, json, time, random
+from pathlib import Path
+from io import BytesIO
+
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+import torchvision.transforms.v2 as T
+from torchvision.models import mobilenet_v3_small
+from PIL import Image
+import requests
+from tqdm import tqdm
+
+import phone_aug
+
+SCRIPT_DIR = Path(__file__).parent
+CACHE_DIR = SCRIPT_DIR / "card_cache"
+OUTPUT_DIR = SCRIPT_DIR / "output"
+API_BASE = "https://api.riftcodex.com"
+
+IMAGE_SIZE = 224
+BATCH_SIZE = 64
+NUM_EPOCHS = 45
+LEARNING_RATE = 2.5e-4
+WEIGHT_DECAY = 1e-4
+REPEATS_PER_EPOCH = 25
+CHECKPOINT_EVERY = 5
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+BEST_PATH = OUTPUT_DIR / "best_model.pth"
+LAST_PATH = OUTPUT_DIR / "last_checkpoint.pth"
+
+
+def fetch_card_list():
+    print("[1/5] Karten-Liste laden ...")
+    cards = []
+    page = 1
+    while True:
+        r = requests.get(f"{API_BASE}/cards?size=100&page={page}", timeout=30).json()
+        items = r.get("items", [])
+        if not items:
+            break
+        cards.extend(items)
+        tp = r.get("pages", 1)
+        if page >= tp:
+            break
+        page += 1
+    return [c for c in cards if c.get("media", {}).get("image_url") and c.get("id")]
+
+
+def ensure_images(cards):
+    print(f"[2/5] {len(cards)} Karten-Bilder (Cache) ...")
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for card in tqdm(cards, desc="Check"):
+        p = CACHE_DIR / f"{card['id']}.png"
+        if not p.exists():
+            try:
+                r = requests.get(card["media"]["image_url"], timeout=30)
+                Image.open(BytesIO(r.content)).convert("RGB").save(p)
+            except Exception as e:
+                print(f"  Skip {card.get('name','?')}: {e}")
+                continue
+        paths.append((card["id"], card.get("name", "?"), p))
+    return paths
+
+
+class CardDataset(Dataset):
+    def __init__(self, entries, transform):
+        self.entries, self.transform = entries, transform
+    def __len__(self):
+        return len(self.entries)
+    def __getitem__(self, idx):
+        _, _, path = self.entries[idx]
+        return self.transform(Image.open(path).convert("RGB")), idx
+
+
+class Repeated(Dataset):
+    def __init__(self, base, n):
+        self.base, self.n = base, n
+    def __len__(self):
+        return len(self.base) * self.n
+    def __getitem__(self, idx):
+        return self.base[idx % len(self.base)]
+
+
+def load_model(num_classes):
+    print(f"[3/5] Modell aus {BEST_PATH.name} laden ...")
+    ck = torch.load(BEST_PATH, map_location=DEVICE, weights_only=True)
+    print(f"  saved val_acc={ck['val_acc']*100:.2f}%")
+    m = mobilenet_v3_small(weights=None)
+    inf = m.classifier[-1].in_features
+    m.classifier[-1] = nn.Linear(inf, num_classes)
+    m.load_state_dict(ck["model_state"])
+    return m.to(DEVICE)
+
+
+@torch.no_grad()
+def evaluate(model, loader):
+    model.eval()
+    correct = total = 0
+    for imgs, labels in loader:
+        imgs, labels = imgs.to(DEVICE, non_blocking=True), labels.to(DEVICE, non_blocking=True)
+        preds = model(imgs).argmax(dim=1)
+        correct += (preds == labels).sum().item()
+        total += imgs.size(0)
+    return correct / max(1, total)
+
+
+def train(model, train_loader, clean_loader, phone_loader, num_classes):
+    print(f"[4/5] Phone-Fine-Tuning auf {DEVICE} ({NUM_EPOCHS} Epochs) ...")
+    opt = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=NUM_EPOCHS)
+    crit = nn.CrossEntropyLoss(label_smoothing=0.05)
+    best_phone = 0.0
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    for ep in range(NUM_EPOCHS):
+        model.train()
+        t0 = time.time()
+        loss_sum = corr = tot = 0
+        pbar = tqdm(train_loader, desc=f"Epoch {ep+1}/{NUM_EPOCHS}", leave=False)
+        for imgs, labels in pbar:
+            imgs, labels = imgs.to(DEVICE, non_blocking=True), labels.to(DEVICE, non_blocking=True)
+            opt.zero_grad()
+            out = model(imgs)
+            loss = crit(out, labels)
+            loss.backward()
+            opt.step()
+            loss_sum += loss.item() * imgs.size(0)
+            corr += (out.argmax(1) == labels).sum().item()
+            tot += imgs.size(0)
+            pbar.set_postfix(loss=f"{loss.item():.3f}", acc=f"{corr/tot*100:.1f}%")
+
+        train_acc = corr / max(1, tot)
+        val_clean = evaluate(model, clean_loader)
+        val_phone = evaluate(model, phone_loader)
+        sched.step()
+        dt = time.time() - t0
+
+        mark = ""
+        if val_phone > best_phone:
+            best_phone = val_phone
+            torch.save({"model_state": model.state_dict(),
+                        "num_classes": num_classes, "val_acc": val_clean,
+                        "val_phone": val_phone}, BEST_PATH)
+            mark = " <- neuer best (phone)"
+        if (ep + 1) % CHECKPOINT_EVERY == 0:
+            torch.save({"model_state": model.state_dict(),
+                        "num_classes": num_classes, "val_acc": val_clean,
+                        "val_phone": val_phone}, LAST_PATH)
+
+        print(f"Epoch {ep+1:>2}/{NUM_EPOCHS}  loss={loss_sum/max(1,tot):.3f}  "
+              f"train_acc={train_acc*100:.1f}%  val_clean={val_clean*100:.1f}%  "
+              f"val_phone={val_phone*100:.1f}%  lr={sched.get_last_lr()[0]:.2e}  ({dt:.0f}s){mark}")
+
+    print(f"-> Best val_phone: {best_phone*100:.2f}%")
+
+
+def export(num_classes, entries):
+    print("[5/5] ONNX exportieren ...")
+    ck = torch.load(BEST_PATH, map_location=DEVICE, weights_only=True)
+    m = mobilenet_v3_small(weights=None)
+    inf = m.classifier[-1].in_features
+    m.classifier[-1] = nn.Linear(inf, num_classes)
+    m.load_state_dict(ck["model_state"])
+    m.eval().to(DEVICE)
+    dummy = torch.randn(1, 3, IMAGE_SIZE, IMAGE_SIZE).to(DEVICE)
+    onnx_path = OUTPUT_DIR / "riftbound-model.onnx"
+    torch.onnx.export(m, dummy, str(onnx_path), input_names=["input"],
+                      output_names=["logits"],
+                      dynamic_axes={"input": {0: "batch"}, "logits": {0: "batch"}},
+                      opset_version=14)
+    print(f"  -> {onnx_path} ({onnx_path.stat().st_size/1024/1024:.1f} MB)")
+    meta = {"version": 1, "model": "mobilenet_v3_small_phone_finetune",
+            "input_size": IMAGE_SIZE, "num_classes": num_classes,
+            "val_acc": ck.get("val_acc"), "val_phone": ck.get("val_phone"),
+            "preprocess": {"mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]},
+            "cardIds": [c for (c, _n, _p) in entries],
+            "cardNames": [n for (_c, n, _p) in entries]}
+    with open(OUTPUT_DIR / "riftbound-model-meta.json", "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False)
+    print("  -> meta.json")
+
+
+def main():
+    print(f"Device: {DEVICE}")
+    if DEVICE.type == "cuda":
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+    cards = fetch_card_list()
+    entries = ensure_images(cards)
+    print(f"  {len(entries)} Karten\n")
+
+    train_tfm = phone_aug.build_phone_pipeline(IMAGE_SIZE, T, torch)
+    phone_val_tfm = phone_aug.build_phone_val_pipeline(IMAGE_SIZE, T, torch)
+    clean_val_tfm = T.Compose([
+        T.Resize((IMAGE_SIZE, IMAGE_SIZE)), T.ToImage(),
+        T.ToDtype(torch.float32, scale=True),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+
+    train_ds = Repeated(CardDataset(entries, train_tfm), REPEATS_PER_EPOCH)
+    clean_ds = CardDataset(entries, clean_val_tfm)
+    phone_ds = CardDataset(entries, phone_val_tfm)
+
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
+                              num_workers=12, pin_memory=True,
+                              persistent_workers=True, prefetch_factor=4)
+    clean_loader = DataLoader(clean_ds, batch_size=BATCH_SIZE, num_workers=4,
+                              pin_memory=True, persistent_workers=True)
+    phone_loader = DataLoader(phone_ds, batch_size=BATCH_SIZE, num_workers=4,
+                              pin_memory=True, persistent_workers=True)
+
+    model = load_model(len(entries))
+    # Baseline messen: wo stehen wir VOR dem Phone-Training?
+    print("Baseline val_phone (vor Training):", f"{evaluate(model, phone_loader)*100:.1f}%")
+    train(model, train_loader, clean_loader, phone_loader, len(entries))
+    export(len(entries), entries)
+    print("\n[OK] Fertig.")
+
+
+if __name__ == "__main__":
+    main()
