@@ -15,3 +15,7 @@ Thumbs.db
 
 # Browser-Cache Dateien falls jemand mal welche speichert
 *.log
+
+# Tote Alt-Ansätze (nicht mehr genutzt)
+riftbound-embeddings.json
+riftbound-orb.json
