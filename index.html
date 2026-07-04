@@ -2681,6 +2681,10 @@
     liveRecentImgMatches = [];
     liveWinHistory = []; // Session-Hub-Penalty bei Stop zurücksetzen
     liveLastAddedKey = null; liveDupSuppressedKey = null; clearDupPrompt();
+    // Vollbild verlassen falls aktiv
+    document.body.classList.remove("scan-fullscreen");
+    var fsIcon = document.querySelector("#live-fullscreen-btn i");
+    if (fsIcon) fsIcon.className = "ti ti-maximize";
     var tb = document.getElementById("live-torch-btn");
     if (tb) { tb.classList.add("hidden"); tb.classList.remove("on"); tb.textContent = "Blitz aus"; }
     var diag = document.getElementById("live-scan-diag");
@@ -3586,11 +3590,25 @@
     document.getElementById("tab-scan").onclick = function () { switchView("scan"); };
     document.getElementById("tab-collection").onclick = function () { switchView("collection"); };
 
+    // Zusammenfassung im Zahnrad-Knopf: aktiver Modus + aktive Filter
+    function updateScanSettingsSummary() {
+      var el = document.getElementById("scan-settings-summary");
+      if (!el) return;
+      var modeLabel = foilMode === "foilOnly" ? "Nur Foil"
+                    : foilMode === "nonFoilOnly" ? "Nur Non-Foil" : "Beide";
+      var active = [];
+      if (specialFilters.overnumber) active.push("Overnumber");
+      if (specialFilters.altArt) active.push("Alt Art");
+      if (specialFilters.promo) active.push("Promo");
+      el.textContent = active.length ? modeLabel + " · " + active.join(", ") : modeLabel;
+    }
+
     document.querySelectorAll("#foil-mode-row [data-mode]").forEach(function (btn) {
       btn.onclick = function () {
         foilMode = btn.getAttribute("data-mode");
         saveFoilMode();
         document.querySelectorAll("#foil-mode-row [data-mode]").forEach(function (b) { b.classList.toggle("active", b === btn); });
+        updateScanSettingsSummary();
       };
     });
 
@@ -3603,8 +3621,10 @@
         specialFilters[key] = !specialFilters[key];
         btn.classList.toggle("active", specialFilters[key]);
         saveSpecialFilters();
+        updateScanSettingsSummary();
       };
     });
+    updateScanSettingsSummary();
 
     document.getElementById("settings-btn").onclick = function () {
       document.getElementById("api-key-overlay").classList.remove("hidden");

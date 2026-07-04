@@ -19,3 +19,6 @@ Thumbs.db
 # Tote Alt-Ansätze (nicht mehr genutzt)
 riftbound-embeddings.json
 riftbound-orb.json
+
+# Preview-Dev-Config (lokal)
+.claude/launch.json
