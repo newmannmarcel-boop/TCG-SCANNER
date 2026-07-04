@@ -154,13 +154,56 @@
     font-variant-numeric: tabular-nums;
   }
   .live-torch-btn {
-    position: absolute; bottom: 8px; right: 8px;
+    position: absolute; bottom: 8px; left: 8px;
     background: rgba(0,0,0,0.6); color: #E6EDF5; font-size: 11px; font-weight: 600;
     padding: 6px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.15);
     cursor: pointer; letter-spacing: 0.3px;
   }
   .live-torch-btn.on { background: rgba(62,208,214,0.85); color: #0B1220; border-color: rgba(62,208,214,1); }
   .live-torch-btn.hidden { display: none; }
+  .live-corner-cluster { position: absolute; bottom: 8px; right: 8px; display: flex; gap: 6px; }
+  .live-corner-btn {
+    width: 36px; height: 36px; border-radius: 9px; background: rgba(0,0,0,0.6);
+    color: #E6EDF5; border: 1px solid rgba(255,255,255,0.15); display: flex;
+    align-items: center; justify-content: center; font-size: 18px; cursor: pointer;
+  }
+  .live-corner-btn.accent { color: #3ED0D6; border-color: #3ED0D6; }
+  /* Vollbild-Scan-Modus */
+  body.scan-fullscreen header, body.scan-fullscreen nav { display: none !important; }
+  body.scan-fullscreen main#view-scan > *:not(#live-video-section) { display: none !important; }
+  body.scan-fullscreen main#view-scan { padding: 0; max-width: none; }
+  body.scan-fullscreen #live-video-section {
+    position: fixed; inset: 0; z-index: 9998; margin: 0; background: #0A101E;
+    display: flex; flex-direction: column;
+  }
+  body.scan-fullscreen .live-video-wrap { flex: 1; border-radius: 0; margin: 0; }
+  body.scan-fullscreen .live-video-wrap video { height: 100%; max-height: none; aspect-ratio: auto; }
+  body.scan-fullscreen #live-debug-drawer, body.scan-fullscreen #live-scan-stop-btn { display: none !important; }
+  /* Scan-Einstellungen (Zahnrad-Panel) */
+  .scan-settings-toggle {
+    width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    background: #131C2E; border: 1px solid #24324A; border-radius: 10px; padding: 11px 14px;
+    color: #E6EDF5; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .scan-settings-toggle i:first-child { color: #3ED0D6; margin-right: 4px; }
+  .scan-settings-summary { margin-left: auto; margin-right: 8px; color: #8A9BB5; font-size: 12px; font-weight: 400; }
+  .scan-settings-toggle.open #scan-settings-chevron, .live-debug-toggle.open #live-debug-chevron { transform: rotate(180deg); }
+  #scan-settings-chevron, #live-debug-chevron { transition: transform 0.2s; color: #8A9BB5; }
+  .scan-settings-panel {
+    background: #101A2C; border: 1px solid #24324A; border-top: none;
+    border-radius: 0 0 10px 10px; padding: 12px 14px; margin-top: -1px;
+  }
+  .scan-settings-panel.hidden { display: none; }
+  /* Debug-Schublade */
+  .live-debug-drawer { margin: 8px 0; }
+  .live-debug-toggle {
+    width: 100%; display: flex; align-items: center; justify-content: space-between;
+    background: #101A2C; border: 1px solid #24324A; border-radius: 8px; padding: 9px 12px;
+    color: #8A9BB5; font-size: 12px; font-weight: 500; cursor: pointer;
+  }
+  .live-debug-toggle i:first-child { color: #5F6E86; margin-right: 4px; }
+  .live-debug-body { padding-top: 8px; }
+  .live-debug-body.hidden { display: none; }
   .live-focus-reticle {
     position: absolute; width: 60px; height: 60px; border-radius: 50%;
     border: 2px solid #3ED0D6; box-shadow: 0 0 0 2px rgba(0,0,0,0.4);
@@ -320,6 +363,7 @@
 <!-- Lädt das auf Riftbound-Karten trainierte MobileNetV3-Small-Modell.   -->
 <!-- ~3 MB Library + ~10 MB Modell, beides nach erstem Laden gecached.   -->
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.24.0/dist/tabler-icons.min.css">
 </head>
 <body>
 
@@ -355,21 +399,28 @@
     <div class="ebb-status" id="ebb-status">0 / 0</div>
     <div class="ebb-hint">Einmaliger Vorgang beim ersten Start. Du kannst schon scannen — OCR springt solange ein. Sobald fertig: Bilderkennung deutlich schneller und genauer.</div>
   </div>
-  <div style="margin-bottom: 16px;">
-    <div class="section-label">Scan-Modus</div>
-    <div class="mode-row" id="foil-mode-row">
-      <button type="button" class="mode-btn focus-ring active" data-mode="either">Beide</button>
-      <button type="button" class="mode-btn focus-ring" data-mode="foilOnly">Nur Foil</button>
-      <button type="button" class="mode-btn focus-ring" data-mode="nonFoilOnly">Nur Non-Foil</button>
+  <div style="margin-bottom: 14px;">
+    <button type="button" id="scan-settings-toggle" class="scan-settings-toggle focus-ring">
+      <span><i class="ti ti-adjustments-horizontal" aria-hidden="true"></i> Scan-Einstellungen</span>
+      <span id="scan-settings-summary" class="scan-settings-summary">Beide</span>
+      <i class="ti ti-chevron-down" id="scan-settings-chevron" aria-hidden="true"></i>
+    </button>
+    <div id="scan-settings-panel" class="scan-settings-panel hidden">
+      <div class="section-label">Scan-Modus</div>
+      <div class="mode-row" id="foil-mode-row">
+        <button type="button" class="mode-btn focus-ring active" data-mode="either">Beide</button>
+        <button type="button" class="mode-btn focus-ring" data-mode="foilOnly">Nur Foil</button>
+        <button type="button" class="mode-btn focus-ring" data-mode="nonFoilOnly">Nur Non-Foil</button>
+      </div>
+      <div class="section-label" style="margin-top: 14px;">Filter (bleiben an, bis du sie selbst ausschaltest)</div>
+      <div class="mode-row" id="special-filter-row">
+        <button type="button" class="mode-btn focus-ring" data-filter="overnumber">Overnumber</button>
+        <button type="button" class="mode-btn focus-ring" data-filter="altArt">Alt Art</button>
+        <button type="button" class="mode-btn focus-ring" data-filter="promo">Promo</button>
+      </div>
+      <p class="source-note">Erkennung per Bild (CNN) + OCR-Fallback. Kartendaten von Riftcodex.com.</p>
+      <p id="ocr-engine-status" style="font-size:11px; margin-top:6px; color:#7C8BA5;"></p>
     </div>
-    <div class="section-label" style="margin-top: 14px;">Filter (bleiben an, bis du sie selbst ausschaltest)</div>
-    <div class="mode-row" id="special-filter-row">
-      <button type="button" class="mode-btn focus-ring" data-filter="overnumber">Overnumber</button>
-      <button type="button" class="mode-btn focus-ring" data-filter="altArt">Alt Art</button>
-      <button type="button" class="mode-btn focus-ring" data-filter="promo">Promo</button>
-    </div>
-    <p class="source-note">Erkennung liest die Kartennummer per OCR (Chrome Android: nativer TextDetector; andere Browser: Tesseract.js). Beim ersten Scan lädt der OCR-Motor kurz nach (~5 Sek). Kartendaten von Riftcodex.com.</p>
-    <p id="ocr-engine-status" style="font-size:11px; margin-top:6px; color:#7C8BA5;"></p>
   </div>
 
   <button type="button" id="live-scan-start-btn" class="btn-primary focus-ring" style="width: 100%; padding: 14px 16px; font-size: 14px; margin-bottom: 10px;">
@@ -383,6 +434,10 @@
         <span class="live-status-pill" id="live-status-pill">Karte ruhig vor die Kamera halten</span>
       </div>
       <div class="live-cam-info" id="live-cam-info">— × —</div>
+      <div class="live-corner-cluster">
+        <button type="button" id="live-settings-btn" class="live-corner-btn" aria-label="Scan-Einstellungen"><i class="ti ti-settings" aria-hidden="true"></i></button>
+        <button type="button" id="live-fullscreen-btn" class="live-corner-btn accent" aria-label="Vollbild"><i class="ti ti-maximize" aria-hidden="true"></i></button>
+      </div>
       <button type="button" id="live-torch-btn" class="live-torch-btn hidden">Blitz aus</button>
       <div class="live-frame-guide"></div>
       <div class="live-focus-hint" id="live-focus-hint">Fokus</div>
@@ -394,20 +449,28 @@
         <button type="button" id="ldp-skip" class="ldp-btn ldp-skip">Ignorieren</button>
       </div>
     </div>
-    <div id="live-scan-diag" class="live-scan-diag hidden"></div>
-    <div id="embed-debug-panel" class="embed-debug-panel">
-      <div class="edp-title">DEBUG: was das CNN sieht</div>
-      <div class="edp-row">
-        <canvas id="edp-canvas" width="80" height="112"></canvas>
-        <div class="edp-stats" id="edp-stats">noch kein Scan</div>
+    <div id="live-debug-drawer" class="live-debug-drawer">
+      <button type="button" id="live-debug-toggle" class="live-debug-toggle focus-ring">
+        <span><i class="ti ti-bug" aria-hidden="true"></i> Debug &amp; Erkennung</span>
+        <i class="ti ti-chevron-down" id="live-debug-chevron" aria-hidden="true"></i>
+      </button>
+      <div id="live-debug-body" class="live-debug-body hidden">
+        <div id="live-scan-diag" class="live-scan-diag hidden"></div>
+        <div id="embed-debug-panel" class="embed-debug-panel">
+          <div class="edp-title">Was das CNN sieht</div>
+          <div class="edp-row">
+            <canvas id="edp-canvas" width="80" height="112"></canvas>
+            <div class="edp-stats" id="edp-stats">noch kein Scan</div>
+          </div>
+        </div>
+        <div id="on-screen-log" class="on-screen-log">
+          <div class="osl-header">
+            <span>Console-Log (live)</span>
+            <button type="button" id="osl-clear" class="osl-clear-btn">Leeren</button>
+          </div>
+          <div class="osl-body" id="osl-body"></div>
+        </div>
       </div>
-    </div>
-    <div id="on-screen-log" class="on-screen-log">
-      <div class="osl-header">
-        <span>Console-Log (live)</span>
-        <button type="button" id="osl-clear" class="osl-clear-btn">Leeren</button>
-      </div>
-      <div class="osl-body" id="osl-body"></div>
     </div>
     <button type="button" id="live-scan-stop-btn" class="btn-secondary focus-ring" style="width: 100%;">✕ Live-Scan beenden</button>
   </div>
@@ -3599,6 +3662,41 @@
       // bis eine andere Karte erkannt wird.
       liveDupSuppressedKey = liveDupPendingKey;
       clearDupPrompt();
+    };
+
+    // --- Scan-Einstellungen (Zahnrad-Panel) ---
+    function toggleScanSettings(forceOpen) {
+      var panel = document.getElementById("scan-settings-panel");
+      var toggle = document.getElementById("scan-settings-toggle");
+      var open = forceOpen != null ? forceOpen : panel.classList.contains("hidden");
+      panel.classList.toggle("hidden", !open);
+      toggle.classList.toggle("open", open);
+    }
+    document.getElementById("scan-settings-toggle").onclick = function () { toggleScanSettings(); };
+    document.getElementById("live-settings-btn").onclick = function () {
+      // Kamera-Zahnrad: Vollbild verlassen (falls aktiv) und Einstellungen öffnen
+      setFullscreen(false);
+      toggleScanSettings(true);
+      document.getElementById("scan-settings-panel").scrollIntoView({ behavior: "smooth", block: "center" });
+    };
+
+    // --- Vollbild-Umschalter ---
+    function setFullscreen(on) {
+      document.body.classList.toggle("scan-fullscreen", on);
+      var icon = document.querySelector("#live-fullscreen-btn i");
+      if (icon) icon.className = on ? "ti ti-minimize" : "ti ti-maximize";
+    }
+    document.getElementById("live-fullscreen-btn").onclick = function () {
+      setFullscreen(!document.body.classList.contains("scan-fullscreen"));
+    };
+
+    // --- Debug-Schublade ---
+    document.getElementById("live-debug-toggle").onclick = function () {
+      var body = document.getElementById("live-debug-body");
+      var toggle = document.getElementById("live-debug-toggle");
+      var open = body.classList.contains("hidden");
+      body.classList.toggle("hidden", !open);
+      toggle.classList.toggle("open", open);
     };
 
     function handleFiles(fileList) {
