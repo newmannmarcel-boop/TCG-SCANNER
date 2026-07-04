@@ -178,16 +178,19 @@
   body.scan-fullscreen main#view-scan { padding: 0; max-width: none; }
   body.scan-fullscreen #live-video-section {
     position: fixed; inset: 0; z-index: 9998; margin: 0; background: #0A101E;
-    display: flex; align-items: center; justify-content: center;
   }
-  /* Kamera behaelt 3:4 (wie Normalmodus), nur groesser + zentriert.
-     So bleiben Rahmen UND Erkennungs-Crop korrekt. */
+  /* Echtes randloses Vollbild: Kamera fuellt den Screen (object-fit cover).
+     Der Guide-Rahmen bleibt kartenfoermig (siehe .live-frame-guide),
+     der Crop liest die echte Rahmen-Position (getGuideRegionInCanvas). */
   body.scan-fullscreen .live-video-wrap {
-    border-radius: 0; margin: 0; width: auto; height: auto;
-    max-width: 100vw; max-height: 100vh;
+    border-radius: 0; margin: 0; width: 100vw; height: 100vh;
   }
   body.scan-fullscreen .live-video-wrap video {
-    width: auto; height: auto; max-width: 100vw; max-height: 100vh; aspect-ratio: 3 / 4;
+    width: 100%; height: 100%; max-height: none; aspect-ratio: auto; object-fit: cover;
+  }
+  /* Dup-Prompt als fixes Overlay unten — zerlegt so nicht das Kamerabild */
+  body.scan-fullscreen #live-dup-prompt {
+    position: fixed; left: 12px; right: 12px; bottom: 20px; z-index: 9999; margin: 0;
   }
   body.scan-fullscreen #live-debug-drawer, body.scan-fullscreen #live-scan-stop-btn { display: none !important; }
   /* Scan-Einstellungen (Zahnrad-Panel) */
@@ -317,8 +320,10 @@
   .ebb-status { color: #3ED0D6; font-size: 11px; font-weight: 600; margin-bottom: 8px; font-variant-numeric: tabular-nums; }
   .ebb-hint { color: #7C8BA5; font-size: 11px; line-height: 1.45; }
   .live-frame-guide {
-    /* TCG-Karte 63×88mm = 1.4:1 — Im 3:4-Container: Breite 72% → Höhe ≈ 76% → AR=1.41 */
-    position: absolute; top: 12%; left: 14%; right: 14%; bottom: 12%;
+    /* Zentrierte Box mit Karten-Seitenverhaeltnis (1:1.4). Bleibt in JEDEM
+       Container-Format kartenfoermig — funktioniert in Normal- UND Vollbild. */
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: 74%; aspect-ratio: 1 / 1.4; max-height: 82%;
     border: 2px dashed rgba(62,208,214,0.6); border-radius: 12px; pointer-events: none;
   }
 
@@ -1014,28 +1019,55 @@
   // sieht stimmt NICHT mit den gleichen Prozent-Koordinaten im Canvas überein.
   // Wir müssen erst die "Visible Region" im Canvas berechnen die dem
   // entspricht was der User auf dem Display sieht.
-  var DISPLAY_ASPECT_W = 3, DISPLAY_ASPECT_H = 4; // aus CSS .live-video-wrap video
-  function getVisibleRegion(canvas) {
+  var DISPLAY_ASPECT_W = 3, DISPLAY_ASPECT_H = 4; // Fallback-Aspect (Galerie-Fotos)
+  // Fallback ohne Live-Guide (z.B. hochgeladene Fotos): 3:4-Region annehmen.
+  function getVisibleRegionByAspect(canvas) {
     var displayAspect = DISPLAY_ASPECT_W / DISPLAY_ASPECT_H; // 0.75
     var W = canvas.width, H = canvas.height;
     var canvasAspect = W / H;
     if (canvasAspect > displayAspect) {
-      // Canvas breiter als Display → links/rechts gecroppt
-      var visH = H;
       var visW = Math.round(H * displayAspect);
-      var visX = Math.round((W - visW) / 2);
-      return { x: visX, y: 0, w: visW, h: visH };
+      return { x: Math.round((W - visW) / 2), y: 0, w: visW, h: H };
     } else {
-      // Canvas schmaler als Display → oben/unten gecroppt (object-fit: cover)
-      var visW2 = W;
       var visH2 = Math.round(W / displayAspect);
-      var visY = Math.round((H - visH2) / 2);
-      return { x: 0, y: visY, w: visW2, h: visH2 };
+      return { x: 0, y: Math.round((H - visH2) / 2), w: W, h: visH2 };
     }
   }
 
-  // Crop relativ zur SICHTBAREN Display-Region, nicht zum ganzen Canvas.
-  // Damit stimmen die Prozent-Koordinaten genau mit dem überein was User sieht.
+  // Echte Guide-Rahmen-Region im Canvas (Live-Scan). Liest die tatsaechliche
+  // Bildschirm-Position des Rahmens ueber dem Video und mappt sie via
+  // object-fit:cover auf die Canvas-(= intrinsisches Frame)-Koordinaten.
+  // Funktioniert in JEDEM Anzeige-Format (Normal 3:4 UND randloses Vollbild).
+  function getGuideRegionInCanvas(canvas) {
+    var video = document.getElementById("live-video");
+    var guide = document.querySelector(".live-frame-guide");
+    if (!video || !guide || !liveActive) return getVisibleRegionByAspect(canvas);
+    var vr = video.getBoundingClientRect();
+    var gr = guide.getBoundingClientRect();
+    var vW = video.videoWidth, vH = video.videoHeight;
+    if (!vW || !vH || vr.width < 2 || vr.height < 2 || gr.width < 2) {
+      return getVisibleRegionByAspect(canvas);
+    }
+    var scale = Math.max(vr.width / vW, vr.height / vH); // object-fit: cover
+    var offX = (vr.width - vW * scale) / 2;
+    var offY = (vr.height - vH * scale) / 2;
+    var ix = ((gr.left - vr.left) - offX) / scale;
+    var iy = ((gr.top - vr.top) - offY) / scale;
+    var iw = gr.width / scale, ih = gr.height / scale;
+    var cs = canvas.width / vW; // Canvas ist das (ggf. verkleinerte) volle Frame
+    var rx = Math.round(ix * cs), ry = Math.round(iy * cs);
+    var rw = Math.round(iw * cs), rh = Math.round(ih * cs);
+    rx = Math.max(0, Math.min(rx, canvas.width - 1));
+    ry = Math.max(0, Math.min(ry, canvas.height - 1));
+    rw = Math.max(1, Math.min(rw, canvas.width - rx));
+    rh = Math.max(1, Math.min(rh, canvas.height - ry));
+    return { x: rx, y: ry, w: rw, h: rh };
+  }
+
+  // getVisibleRegion liefert jetzt die echte Karten-(Guide-)Region.
+  function getVisibleRegion(canvas) { return getGuideRegionInCanvas(canvas); }
+
+  // Crop relativ zur Guide-Region. Prozent-Insets fuer OCR (Nummer unten-links).
   function cropCanvasRegion(canvas, leftPct, topPct, rightPct, bottomPct) {
     var vis = getVisibleRegion(canvas);
     var x = Math.floor(vis.x + vis.w * leftPct);
@@ -1043,13 +1075,14 @@
     var w = Math.floor(vis.w * (1 - leftPct - rightPct));
     var h = Math.floor(vis.h * (1 - topPct - bottomPct));
     var out = document.createElement("canvas");
-    out.width = w; out.height = h;
-    out.getContext("2d").drawImage(canvas, x, y, w, h, 0, 0, w, h);
+    out.width = Math.max(1, w); out.height = Math.max(1, h);
+    out.getContext("2d").drawImage(canvas, x, y, w, h, 0, 0, out.width, out.height);
     return out;
   }
 
+  // CNN bekommt die komplette Karten-Region (= Guide-Rahmen), kein Extra-Inset.
   function cropGuideBoxArea(canvas) {
-    return cropCanvasRegion(canvas, 0.14, 0.12, 0.14, 0.12);
+    return cropCanvasRegion(canvas, 0, 0, 0, 0);
   }
 
   // Mehrere Crop-Varianten — fängt schiefe/verschobene Karten ab.
