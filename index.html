@@ -98,12 +98,16 @@
     display: flex; align-items: center; gap: 10px; background: #131C2E; border-radius: 12px;
     padding: 10px 12px; border-left: 3px solid #5F6E86;
   }
-  .queue-row img { width: 38px; height: 52px; object-fit: cover; border-radius: 5px; flex-shrink: 0; }
+  .queue-row img { width: 42px; height: 58px; object-fit: cover; border-radius: 6px; flex-shrink: 0; }
   .queue-row .info { flex: 1; min-width: 0; }
   .queue-row .name-row { display: flex; align-items: baseline; gap: 6px; }
-  .queue-row .name { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .queue-row .name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .queue-row .foil-tag { font-size: 10px; font-weight: 700; color: #3ED0D6; }
-  .queue-row .meta { font-size: 12px; color: #7C8BA5; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .queue-row .meta { font-size: 11px; color: #7C8BA5; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .queue-row .qmeta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+  .queue-row .qchip { font-size: 11px; padding: 2px 7px; border-radius: 6px; background: #1C2942; color: #8A9BB5; }
+  .queue-row .qchip.foil { color: #3ED0D6; }
+  .queue-row .qchip.cond { color: #C9D4A8; }
   .queue-row .analyzing { display: flex; align-items: center; gap: 7px; font-size: 13px; color: #7C8BA5; }
   .queue-row .error-text { font-size: 13px; color: #D4824C; }
 
@@ -174,10 +178,17 @@
   body.scan-fullscreen main#view-scan { padding: 0; max-width: none; }
   body.scan-fullscreen #live-video-section {
     position: fixed; inset: 0; z-index: 9998; margin: 0; background: #0A101E;
-    display: flex; flex-direction: column;
+    display: flex; align-items: center; justify-content: center;
   }
-  body.scan-fullscreen .live-video-wrap { flex: 1; border-radius: 0; margin: 0; }
-  body.scan-fullscreen .live-video-wrap video { height: 100%; max-height: none; aspect-ratio: auto; }
+  /* Kamera behaelt 3:4 (wie Normalmodus), nur groesser + zentriert.
+     So bleiben Rahmen UND Erkennungs-Crop korrekt. */
+  body.scan-fullscreen .live-video-wrap {
+    border-radius: 0; margin: 0; width: auto; height: auto;
+    max-width: 100vw; max-height: 100vh;
+  }
+  body.scan-fullscreen .live-video-wrap video {
+    width: auto; height: auto; max-width: 100vw; max-height: 100vh; aspect-ratio: 3 / 4;
+  }
   body.scan-fullscreen #live-debug-drawer, body.scan-fullscreen #live-scan-stop-btn { display: none !important; }
   /* Scan-Einstellungen (Zahnrad-Panel) */
   .scan-settings-toggle {
@@ -187,13 +198,26 @@
   }
   .scan-settings-toggle i:first-child { color: #3ED0D6; margin-right: 4px; }
   .scan-settings-summary { margin-left: auto; margin-right: 8px; color: #8A9BB5; font-size: 12px; font-weight: 400; }
-  .scan-settings-toggle.open #scan-settings-chevron, .live-debug-toggle.open #live-debug-chevron { transform: rotate(180deg); }
-  #scan-settings-chevron, #live-debug-chevron { transition: transform 0.2s; color: #8A9BB5; }
-  .scan-settings-panel {
-    background: #101A2C; border: 1px solid #24324A; border-top: none;
-    border-radius: 0 0 10px 10px; padding: 12px 14px; margin-top: -1px;
+  .live-debug-toggle.open #live-debug-chevron { transform: rotate(180deg); }
+  #live-debug-chevron { transition: transform 0.2s; color: #8A9BB5; }
+  #scan-settings-chevron { color: #8A9BB5; }
+  .scan-settings-overlay {
+    position: fixed; inset: 0; z-index: 10000; background: rgba(0,0,0,0.6);
+    display: flex; align-items: center; justify-content: center; padding: 20px;
   }
-  .scan-settings-panel.hidden { display: none; }
+  .scan-settings-overlay.hidden { display: none; }
+  .scan-settings-modal {
+    width: 100%; max-width: 420px; background: #131C2E; border: 1px solid #24324A;
+    border-radius: 14px; overflow: hidden;
+  }
+  .ssm-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 16px; border-bottom: 1px solid #24324A; color: #E6EDF5;
+    font-size: 14px; font-weight: 600;
+  }
+  .ssm-header i:first-child { color: #3ED0D6; margin-right: 6px; }
+  .ssm-close { background: transparent; border: none; color: #8A9BB5; font-size: 20px; cursor: pointer; padding: 2px 6px; }
+  .ssm-body { padding: 14px 16px; }
   /* Debug-Schublade */
   .live-debug-drawer { margin: 8px 0; }
   .live-debug-toggle {
@@ -403,23 +427,32 @@
     <button type="button" id="scan-settings-toggle" class="scan-settings-toggle focus-ring">
       <span><i class="ti ti-adjustments-horizontal" aria-hidden="true"></i> Scan-Einstellungen</span>
       <span id="scan-settings-summary" class="scan-settings-summary">Beide</span>
-      <i class="ti ti-chevron-down" id="scan-settings-chevron" aria-hidden="true"></i>
+      <i class="ti ti-chevron-right" id="scan-settings-chevron" aria-hidden="true"></i>
     </button>
-    <div id="scan-settings-panel" class="scan-settings-panel hidden">
-      <div class="section-label">Scan-Modus</div>
-      <div class="mode-row" id="foil-mode-row">
-        <button type="button" class="mode-btn focus-ring active" data-mode="either">Beide</button>
-        <button type="button" class="mode-btn focus-ring" data-mode="foilOnly">Nur Foil</button>
-        <button type="button" class="mode-btn focus-ring" data-mode="nonFoilOnly">Nur Non-Foil</button>
+  </div>
+
+  <div id="scan-settings-overlay" class="scan-settings-overlay hidden">
+    <div class="scan-settings-modal">
+      <div class="ssm-header">
+        <span><i class="ti ti-adjustments-horizontal" aria-hidden="true"></i> Scan-Einstellungen</span>
+        <button type="button" id="scan-settings-close" class="ssm-close" aria-label="Schließen"><i class="ti ti-x" aria-hidden="true"></i></button>
       </div>
-      <div class="section-label" style="margin-top: 14px;">Filter (bleiben an, bis du sie selbst ausschaltest)</div>
-      <div class="mode-row" id="special-filter-row">
-        <button type="button" class="mode-btn focus-ring" data-filter="overnumber">Overnumber</button>
-        <button type="button" class="mode-btn focus-ring" data-filter="altArt">Alt Art</button>
-        <button type="button" class="mode-btn focus-ring" data-filter="promo">Promo</button>
+      <div class="ssm-body">
+        <div class="section-label">Scan-Modus</div>
+        <div class="mode-row" id="foil-mode-row">
+          <button type="button" class="mode-btn focus-ring active" data-mode="either">Beide</button>
+          <button type="button" class="mode-btn focus-ring" data-mode="foilOnly">Nur Foil</button>
+          <button type="button" class="mode-btn focus-ring" data-mode="nonFoilOnly">Nur Non-Foil</button>
+        </div>
+        <div class="section-label" style="margin-top: 14px;">Filter (bleiben an, bis du sie selbst ausschaltest)</div>
+        <div class="mode-row" id="special-filter-row">
+          <button type="button" class="mode-btn focus-ring" data-filter="overnumber">Overnumber</button>
+          <button type="button" class="mode-btn focus-ring" data-filter="altArt">Alt Art</button>
+          <button type="button" class="mode-btn focus-ring" data-filter="promo">Promo</button>
+        </div>
+        <p class="source-note">Erkennung per Bild (CNN) + OCR-Fallback. Kartendaten von Riftcodex.com.</p>
+        <p id="ocr-engine-status" style="font-size:11px; margin-top:6px; color:#7C8BA5;"></p>
       </div>
-      <p class="source-note">Erkennung per Bild (CNN) + OCR-Fallback. Kartendaten von Riftcodex.com.</p>
-      <p id="ocr-engine-status" style="font-size:11px; margin-top:6px; color:#7C8BA5;"></p>
     </div>
   </div>
 
@@ -3348,6 +3381,13 @@
     }).join("");
   }
 
+  // Condition-Kuerzel fuer die Detail-Chips (Near Mint -> NM)
+  function condAbbr(c) {
+    var map = { "Mint": "M", "Near Mint": "NM", "Excellent": "EX", "Good": "GD",
+                "Light Played": "LP", "Played": "PL", "Poor": "PO" };
+    return map[c] || c || "NM";
+  }
+
   function renderQueueRow(entry) {
     var g = GAMES[entry.game] || { label: "Unbekannt", color: "#5F6E86" };
     var borderColor = entry.status === "analyzing" ? "#5F6E86" : entry.status === "error" ? "#D4824C" : g.color;
@@ -3417,13 +3457,22 @@
         bodyHtml = '<span class="error-text">' + escapeHtml(entry.errorMessage || "Erkennung fehlgeschlagen") + ' — tippe ✎ zum Eintragen</span>';
       }
     } else {
-      var metaParts = [gameLabel(entry.game), entry.set, entry.number].filter(Boolean).map(escapeHtml).join(" · ");
       var uf = entry.uncertainFields || [];
-      bodyHtml = '<div class="name-row"><span class="name">' + (escapeHtml(entry.name) || "Unbenannt — bitte prüfen") + '</span>' +
-        (entry.foil ? '<span class="foil-tag">FOIL</span>' : "") + '</div>' +
-        '<div class="meta">' + (metaParts || "Spiel nicht erkannt") + '</div>' +
-        ((entry.game === "riftbound" && entry.selectedCandidate && entry.selectedCandidate.isPromo) ? '<div style="font-size:11px;color:#3ED0D6;margin-top:2px;">Promo-Karte (Set OPP)</div>' : "") +
-        (uf.length > 0 ? '<div style="font-size:11px;color:#D4824C;margin-top:2px;">⚠ Unsicher bei: ' + uf.map(escapeHtml).join(", ") + ' — bitte prüfen</div>' : "");
+      // Sammlernummer aus riftbound_id extrahieren: "sfd-012-221" -> "#012"
+      var mNum = (entry.number || "").match(/^[a-z]+-(\d+\*?[a-z]?)-/i);
+      var cnum = mNum ? "#" + mNum[1] : (entry.number ? escapeHtml(entry.number) : "");
+      var setLabel = entry.set || gameLabel(entry.game);
+      var metaLine = [cnum, escapeHtml(setLabel)].filter(Boolean).join(" · ");
+      // Detail-Chips: Condition · Sprache · Foil · Menge
+      var chips = '<span class="qchip cond">' + escapeHtml(condAbbr(entry.condition)) + '</span>' +
+        '<span class="qchip">' + escapeHtml(entry.language || "EN") + '</span>' +
+        '<span class="qchip ' + (entry.foil ? "foil" : "") + '">' + (entry.foil ? "Foil" : "Non-Foil") + '</span>' +
+        '<span class="qchip">x' + (entry.quantity || 1) + '</span>';
+      bodyHtml = '<div class="name-row"><span class="name">' + (escapeHtml(entry.name) || "Unbenannt — bitte prüfen") + '</span></div>' +
+        '<div class="meta">' + (metaLine || "Spiel nicht erkannt") + '</div>' +
+        '<div class="qmeta">' + chips + '</div>' +
+        ((entry.game === "riftbound" && entry.selectedCandidate && entry.selectedCandidate.isPromo) ? '<div style="font-size:11px;color:#3ED0D6;margin-top:4px;">Promo (Set OPP)</div>' : "") +
+        (uf.length > 0 ? '<div style="font-size:11px;color:#D4824C;margin-top:4px;">⚠ Unsicher: ' + uf.map(escapeHtml).join(", ") + '</div>' : "");
     }
 
     return '<div class="queue-row" style="border-left-color:' + borderColor + '">' +
@@ -3684,20 +3733,16 @@
       clearDupPrompt();
     };
 
-    // --- Scan-Einstellungen (Zahnrad-Panel) ---
-    function toggleScanSettings(forceOpen) {
-      var panel = document.getElementById("scan-settings-panel");
-      var toggle = document.getElementById("scan-settings-toggle");
-      var open = forceOpen != null ? forceOpen : panel.classList.contains("hidden");
-      panel.classList.toggle("hidden", !open);
-      toggle.classList.toggle("open", open);
-    }
-    document.getElementById("scan-settings-toggle").onclick = function () { toggleScanSettings(); };
-    document.getElementById("live-settings-btn").onclick = function () {
-      // Kamera-Zahnrad: Vollbild verlassen (falls aktiv) und Einstellungen öffnen
-      setFullscreen(false);
-      toggleScanSettings(true);
-      document.getElementById("scan-settings-panel").scrollIntoView({ behavior: "smooth", block: "center" });
+    // --- Scan-Einstellungen (Modal-Overlay, funktioniert auch im Vollbild) ---
+    var scanSettingsOverlay = document.getElementById("scan-settings-overlay");
+    function openScanSettings() { scanSettingsOverlay.classList.remove("hidden"); }
+    function closeScanSettings() { scanSettingsOverlay.classList.add("hidden"); }
+    document.getElementById("scan-settings-toggle").onclick = openScanSettings;
+    // Kamera-Zahnrad öffnet dasselbe Modal — OHNE Vollbild zu verlassen
+    document.getElementById("live-settings-btn").onclick = openScanSettings;
+    document.getElementById("scan-settings-close").onclick = closeScanSettings;
+    scanSettingsOverlay.onclick = function (e) {
+      if (e.target === scanSettingsOverlay) closeScanSettings(); // Klick auf Backdrop schließt
     };
 
     // --- Vollbild-Umschalter ---
