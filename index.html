@@ -181,6 +181,17 @@
     display: flex; align-items: center; justify-content: center; font-weight: 600;
     letter-spacing: 0.3px;
   }
+  .live-dup-prompt {
+    margin: 8px 0; padding: 12px 14px; border-radius: 10px;
+    background: #2A2214; border: 1px solid #C9A24B;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  }
+  .live-dup-prompt.hidden { display: none; }
+  .ldp-text { font-size: 13px; color: #EDE7D9; font-weight: 600; line-height: 1.3; flex: 1; }
+  .ldp-buttons { display: flex; gap: 8px; flex-shrink: 0; }
+  .ldp-btn { padding: 8px 12px; border-radius: 8px; font-size: 12px; font-weight: 700; cursor: pointer; border: none; }
+  .ldp-add { background: #C9A24B; color: #1A1710; }
+  .ldp-skip { background: transparent; color: #A89F8A; border: 1px solid #4A4438; }
   .live-scan-diag {
     margin: 6px 0 8px; padding: 7px 10px; border-radius: 8px;
     background: #1A1710; border: 1px solid #2A2618;
@@ -376,6 +387,13 @@
       <div class="live-frame-guide"></div>
       <div class="live-focus-hint" id="live-focus-hint">Fokus</div>
     </div>
+    <div id="live-dup-prompt" class="live-dup-prompt hidden">
+      <div class="ldp-text" id="ldp-text">Karte nochmal erkannt</div>
+      <div class="ldp-buttons">
+        <button type="button" id="ldp-add" class="ldp-btn ldp-add">+ Zweite Karte</button>
+        <button type="button" id="ldp-skip" class="ldp-btn ldp-skip">Ignorieren</button>
+      </div>
+    </div>
     <div id="live-scan-diag" class="live-scan-diag hidden"></div>
     <div id="embed-debug-panel" class="embed-debug-panel">
       <div class="edp-title">DEBUG: was das CNN sieht</div>
@@ -533,6 +551,14 @@
   var liveTorchTrack = null;
   var liveTorchOn = false;
   var liveTorchMode = "off"; // "off" | "scan" | "on"
+  // Duplikat-Schutz: verhindert dass EINE physische Karte, die kurz vor der
+  // Kamera bleibt, mehrfach in die Queue wandert. Wenn dieselbe Karte direkt
+  // hintereinander bestätigt wird, fragt die App nach statt still zu doppeln.
+  var liveLastAddedKey = null;    // Identität der zuletzt live hinzugefügten Karte
+  var liveDupPendingKey = null;   // Karte die gerade auf "zweite Karte?"-Entscheidung wartet
+  var liveDupProceedFn = null;    // Aktion die "+ Zweite hinzufügen" ausführt
+  var liveDupSuppressedKey = null;// Karte für die der User "Ignorieren" wählte (kein Re-Prompt bis andere Karte)
+
   // Buffer der letzten OCR-Lesungen für Konsens-Validierung
   // (verhindert falsche Bestätigungen bei OCR-Wackeln zwischen Frames)
   var liveRecentReads = [];
@@ -1412,18 +1438,53 @@
       "Confidence " + (match.bestProb * 100).toFixed(1) + "%  |  Margin " +
       (match.margin * 100).toFixed(1) + "%",
       "ok");
-    return new Promise(function(resolve) {
+
+    var dupKey = "cnn:" + (card.name || card.number || "?");
+    var addFn = function() {
       canvas.toBlob(function(blob) {
-        if (!blob) { liveBusy = false; resolve(); return; }
+        if (!blob) { liveBusy = false; return; }
         var file = new File([blob], "live-" + Date.now() + ".jpg", { type: "image/jpeg" });
-        addToQueue(file, {
-          number: card.number,
-          setCode: card.setId,
-          matchedCandidates: candidates
-        });
-        resolve();
+        addToQueue(file, { number: card.number, setCode: card.setId, matchedCandidates: candidates });
       }, "image/jpeg", 0.92);
-    });
+    };
+    liveDuplicateGate(dupKey, (card.name || card.number || "Karte"), addFn);
+  }
+
+  // ---- Duplikat-Schutz für Live-Scan ----
+  // Verhindert dass eine physische Karte, die kurz vor der Kamera bleibt,
+  // mehrfach in die Queue wandert. Direktes Duplikat → nachfragen statt doppeln.
+  function liveDuplicateGate(key, label, addFn) {
+    if (key && key === liveLastAddedKey) {
+      // Schon prompten wir dafür, oder User hat "Ignorieren" gewählt → still nichts tun
+      if (liveDupPendingKey === key || liveDupSuppressedKey === key) {
+        liveBusy = false;
+        return;
+      }
+      // Erstes direktes Duplikat → nachfragen
+      liveDupPendingKey = key;
+      liveDupProceedFn = addFn;
+      showDupPrompt(label);
+      liveBusy = false;
+      return;
+    }
+    // Neue (andere) Karte → normal hinzufügen, Zustand zurücksetzen
+    liveLastAddedKey = key;
+    liveDupSuppressedKey = null;
+    clearDupPrompt();
+    addFn();
+  }
+
+  function showDupPrompt(label) {
+    var el = document.getElementById("live-dup-prompt");
+    var txt = document.getElementById("ldp-text");
+    if (txt) txt.textContent = "„" + label + "\" schon gescannt — nochmal dieselbe Karte?";
+    if (el) el.classList.remove("hidden");
+  }
+  function clearDupPrompt() {
+    liveDupPendingKey = null;
+    liveDupProceedFn = null;
+    var el = document.getElementById("live-dup-prompt");
+    if (el) el.classList.add("hidden");
   }
 
   // ============================================================
@@ -2556,6 +2617,7 @@
     liveRecentReads = [];
     liveRecentImgMatches = [];
     liveWinHistory = []; // Session-Hub-Penalty bei Stop zurücksetzen
+    liveLastAddedKey = null; liveDupSuppressedKey = null; clearDupPrompt();
     var tb = document.getElementById("live-torch-btn");
     if (tb) { tb.classList.add("hidden"); tb.classList.remove("on"); tb.textContent = "Blitz aus"; }
     var diag = document.getElementById("live-scan-diag");
@@ -2888,24 +2950,25 @@
     console.log("[Scan-Pfad] OCR bestätigt:", confirmedLabel);
     setLiveStatusPill("Bestätigt: " + confirmedLabel, true);
 
-    return new Promise(function(resolve) {
+    var dupKey = "ocr:" + (confirmed.setCode || "") + confirmed.number;
+    var addFn = function() {
       canvas.toBlob(function(blob) {
-        if (!blob) { liveBusy = false; resolve(); return; }
+        if (!blob) { liveBusy = false; return; }
         var file = new File([blob], "live-" + Date.now() + ".jpg", { type: "image/jpeg" });
         addToQueue(file, { number: confirmed.number, setCode: confirmed.setCode });
         setTimeout(function() {
           var diag = window._lastSearchDiag;
-          if (!diag) { updateScanDiag(confirmed, "Suche läuft …", null); resolve(); return; }
+          if (!diag) { updateScanDiag(confirmed, "Suche läuft …", null); return; }
           var ok = diag.matchedSet && diag.candidateCount === 1;
           var line = "OCR bestätigt: " + (confirmed.setCode || "—") + " " + confirmed.number +
                      " → " + (diag.matchedSet || "kein Match") +
                      (diag.candidateCount ? "  (" + diag.candidateCount + " Treffer)" : "");
           var detail = diag.reason || "";
           updateScanDiag(confirmed, line + (detail ? "\n" + detail : ""), ok ? "ok" : "warn");
-          resolve();
         }, 200);
       }, "image/jpeg", 0.92);
-    });
+    };
+    liveDuplicateGate(dupKey, confirmedLabel, addFn);
   }
 
   // Behandelt einen Embedding-Match. match.candidates enthält ALLE Karten
@@ -3522,6 +3585,21 @@
     document.getElementById("live-scan-start-btn").onclick = startLiveScan;
     document.getElementById("live-scan-stop-btn").onclick = stopLiveScan;
     document.getElementById("live-torch-btn").onclick = cycleTorch;
+    document.getElementById("ldp-add").onclick = function () {
+      // "+ Zweite Karte" → wirklich als zweite Kopie hinzufügen.
+      // liveLastAddedKey bleibt = Key, damit eine DRITTE identische Karte wieder fragt,
+      // aber wir suppressen, damit dieselbe Karte im Bild nicht sofort erneut promptet.
+      var fn = liveDupProceedFn;
+      liveDupSuppressedKey = liveDupPendingKey;
+      clearDupPrompt();
+      if (fn) fn();
+    };
+    document.getElementById("ldp-skip").onclick = function () {
+      // "Ignorieren" → nicht hinzufügen, für diese Karte kein Re-Prompt
+      // bis eine andere Karte erkannt wird.
+      liveDupSuppressedKey = liveDupPendingKey;
+      clearDupPrompt();
+    };
 
     function handleFiles(fileList) {
       Array.prototype.slice.call(fileList || []).forEach(function (f) { addToQueue(f); });
