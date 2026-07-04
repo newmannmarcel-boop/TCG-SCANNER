@@ -193,6 +193,21 @@
     position: fixed; left: 12px; right: 12px; bottom: 20px; z-index: 9999; margin: 0;
   }
   body.scan-fullscreen #live-debug-drawer, body.scan-fullscreen #live-scan-stop-btn { display: none !important; }
+  /* Steuer-Knoepfe im Vollbild NACH OBEN (unten verstecken Handy-Leisten sie),
+     mit Safe-Area-Abstand + groesser fuer sichere Bedienbarkeit. */
+  body.scan-fullscreen .live-corner-cluster {
+    top: calc(env(safe-area-inset-top, 0px) + 12px); bottom: auto; right: 12px; z-index: 3;
+  }
+  body.scan-fullscreen .live-corner-btn { width: 46px; height: 46px; font-size: 23px; }
+  body.scan-fullscreen .live-torch-btn {
+    top: calc(env(safe-area-inset-top, 0px) + 12px); bottom: auto; left: 12px; z-index: 3;
+    padding: 11px 12px; font-size: 13px;
+  }
+  body.scan-fullscreen .live-cam-info { display: none; }
+  body.scan-fullscreen .live-status-bar {
+    top: auto; bottom: calc(env(safe-area-inset-bottom, 0px) + 74px);
+    left: 12px; right: 12px; justify-content: center; z-index: 3;
+  }
   /* Scan-Einstellungen (Zahnrad-Panel) */
   .scan-settings-toggle {
     width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -2485,7 +2500,11 @@
       : identifyCardOCR(previewUrl);
 
     resultPromise.then(function (result) {
-      var foilValue = foilMode === "foilOnly" ? true : foilMode === "nonFoilOnly" ? false : false;
+      // "Beide" (either): Foil-Status standardmaessig nach Raritaet ableiten.
+      // Rare und hoeher sind bei Riftbound praktisch immer Foil (glitzernd),
+      // Common/Uncommon sind Non-Foil. foilOnly/nonFoilOnly erzwingen fix.
+      var foilForced = foilMode === "foilOnly" ? true : foilMode === "nonFoilOnly" ? false : null;
+      var foilValue = foilForced === null ? false : foilForced;
       // Wenn Bilderkennung Kandidaten geliefert hat → direkt nehmen
       // (matchedCandidates = Liste aller Karten mit identischem Artwork,
       // matchedCard = einzelne Karte für legacy-Aufrufe)
@@ -2543,6 +2562,8 @@
               entry.status = "ready";
               entry.name = ac.name; entry.set = ac.set;
               entry.number = ac.number; entry.rarity = ac.rarity;
+              // Foil nach Raritaet, wenn nicht per Modus erzwungen
+              if (foilForced === null) entry.foil = isFoilByRarity(ac.rarity);
               entry.candidates = [ac]; entry.selectedCandidate = ac; entry.cardImageUrl = ac.imageUrl;
             } else {
               // Mehrdeutig → Auswahl anzeigen, Filter-Treffer oben
@@ -2581,6 +2602,10 @@
     entry.set = candidate.set;
     entry.number = candidate.number;
     entry.rarity = candidate.rarity;
+    // Foil nach Raritaet, wenn nicht per Modus erzwungen
+    if (foilMode !== "foilOnly" && foilMode !== "nonFoilOnly") {
+      entry.foil = isFoilByRarity(candidate.rarity);
+    }
     entry.selectedCandidate = candidate;
     entry.cardImageUrl = candidate.imageUrl;
     renderQueue();
@@ -3412,6 +3437,13 @@
         '<div class="label">' + escapeHtml(g.short) + '</div>' +
         '<div class="value font-display">' + (counts[key] || 0) + '</div></div>';
     }).join("");
+  }
+
+  // Rare und hoeher sind bei Riftbound praktisch immer Foil (glitzernd).
+  // "uncommon" enthaelt "common" -> beide werden als Non-Foil erkannt.
+  function isFoilByRarity(rarity) {
+    if (!rarity) return false;
+    return String(rarity).toLowerCase().indexOf("common") === -1;
   }
 
   // Condition-Kuerzel fuer die Detail-Chips (Near Mint -> NM)
