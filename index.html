@@ -567,11 +567,12 @@
 </main>
 
 <main id="view-collection" class="wide hidden">
-  <div style="display: flex; gap: 8px;">
-    <div class="search-wrap">
+  <div style="display: flex; gap: 8px; align-items: center;">
+    <div class="search-wrap" style="flex:1;">
       <span class="search-icon">🔍</span>
       <input type="text" id="search-input" class="input-field focus-ring" placeholder="Name, Set oder Nummer suchen">
     </div>
+    <button type="button" id="csv-export-btn" class="btn-icon focus-ring" style="font-size:20px; padding:8px; color:#3ED0D6; flex-shrink:0;" title="CSV exportieren">⬇</button>
   </div>
   <div class="filter-chips" id="filter-chips"></div>
   <div id="collection-content"></div>
@@ -2642,6 +2643,57 @@
     renderHeaderCount();
   }
 
+  function exportCSV() {
+    var filtered = cards.filter(function (c) {
+      if (filterGame !== "all" && c.game !== filterGame) return false;
+      if (searchTerm.trim()) {
+        var t = searchTerm.toLowerCase();
+        return c.name.toLowerCase().indexOf(t) !== -1 || c.set.toLowerCase().indexOf(t) !== -1 || c.number.toLowerCase().indexOf(t) !== -1;
+      }
+      return true;
+    });
+    if (filtered.length === 0) { showToast("Keine Karten zum Exportieren."); return; }
+    var sep = ";";
+    var header = ["Name", "Set", "Nummer", "Seltenheit", "Zustand", "Sprache", "Foil", "Menge", "Spiel"];
+    var rows = [header.join(sep)];
+    filtered.forEach(function (c) {
+      var row = [
+        csvField(c.name || ""),
+        csvField(c.set || ""),
+        csvField(c.number || ""),
+        csvField(c.rarity || ""),
+        csvField(c.condition || ""),
+        csvField(c.language || ""),
+        c.foil ? "Ja" : "Nein",
+        String(c.quantity || 1),
+        csvField((GAMES[c.game] || {}).label || c.game || "")
+      ];
+      rows.push(row.join(sep));
+    });
+    var bom = "﻿";
+    var blob = new Blob([bom + rows.join("\r\n")], { type: "text/csv;charset=utf-8;" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    var d = new Date();
+    var stamp = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+    a.href = url;
+    a.download = "kartenkammer-" + stamp + ".csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    var total = filtered.reduce(function (s, c) { return s + (c.quantity || 1); }, 0);
+    showToast(filtered.length + " Karten (" + total + " Stück) exportiert.");
+  }
+
+  function csvField(val) {
+    val = String(val);
+    if (val.indexOf(";") !== -1 || val.indexOf('"') !== -1 || val.indexOf("\n") !== -1) {
+      return '"' + val.replace(/"/g, '""') + '"';
+    }
+    return val;
+  }
+
   function startLiveScan() {
     hideLiveError();
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -3842,6 +3894,7 @@
 
     document.getElementById("save-all-btn").onclick = saveAllReady;
     document.getElementById("search-input").oninput = function (e) { searchTerm = e.target.value; renderCollection(); };
+    document.getElementById("csv-export-btn").onclick = exportCSV;
 
     var overlay = document.getElementById("api-key-overlay");
     if (apiKey) overlay.classList.add("hidden");
