@@ -2643,6 +2643,9 @@
     renderHeaderCount();
   }
 
+  var LANG_MAP = { DE: "German", EN: "English", JP: "Japanese", FR: "French", IT: "Italian", ES: "Spanish", PT: "Portuguese", KR: "Korean", CN: "Chinese" };
+  var COND_MAP = { "Mint": "MT", "Near Mint": "NM", "Excellent": "EX", "Good": "GD", "Light Played": "LP", "Played": "PL", "Poor": "PO" };
+
   function exportCSV() {
     var filtered = cards.filter(function (c) {
       if (filterGame !== "all" && c.game !== filterGame) return false;
@@ -2654,19 +2657,19 @@
     });
     if (filtered.length === 0) { showToast("Keine Karten zum Exportieren."); return; }
     var sep = ";";
-    var header = ["Name", "Set", "Nummer", "Seltenheit", "Zustand", "Sprache", "Foil", "Menge", "Spiel"];
+    var header = ["Name", "Expansion", "Collector Number", "Rarity", "Condition", "Language", "Foil", "Quantity"];
     var rows = [header.join(sep)];
     filtered.forEach(function (c) {
+      var num = (c.number || "").split("/")[0].trim();
       var row = [
         csvField(c.name || ""),
         csvField(c.set || ""),
-        csvField(c.number || ""),
+        csvField(num),
         csvField(c.rarity || ""),
-        csvField(c.condition || ""),
-        csvField(c.language || ""),
-        c.foil ? "Ja" : "Nein",
-        String(c.quantity || 1),
-        csvField((GAMES[c.game] || {}).label || c.game || "")
+        COND_MAP[c.condition] || "NM",
+        LANG_MAP[c.language] || c.language || "English",
+        c.foil ? "Yes" : "",
+        String(c.quantity || 1)
       ];
       rows.push(row.join(sep));
     });
