@@ -464,6 +464,8 @@
           <button type="button" class="mode-btn focus-ring" data-mode="foilOnly">Nur Foil</button>
           <button type="button" class="mode-btn focus-ring" data-mode="nonFoilOnly">Nur Non-Foil</button>
         </div>
+        <div class="section-label" style="margin-top: 14px;">Set (nur dieses Set erkennen — deutlich treffsicherer)</div>
+        <div class="mode-row" id="set-filter-row" style="flex-wrap: wrap;"></div>
         <div class="section-label" style="margin-top: 14px;">Filter (bleiben an, bis du sie selbst ausschaltest)</div>
         <div class="mode-row" id="special-filter-row">
           <button type="button" class="mode-btn focus-ring" data-filter="overnumber">Overnumber</button>
@@ -648,11 +650,16 @@
   var STORAGE_KEY_FOILMODE = "kartenkammer_foilmode";
   var STORAGE_KEY_SPECIALFILTERS = "kartenkammer_special_filters";
   var STORAGE_KEY_APIKEY = "kartenkammer_api_key";
+  var STORAGE_KEY_SETFILTER = "kartenkammer_setfilter";
 
   var cards = [];
   var queue = [];
   var foilMode = "either";
   var specialFilters = { overnumber: false, altArt: false, promo: false };
+  // Set-Filter beim Scannen: "all" = alle Sets, sonst eine setId (z.B. "VEN").
+  // Schränkt die CNN-Erkennung auf ein Set ein -> weniger Verwechslung durch
+  // Nachdrucke/Metal-Varianten desselben Artworks in anderen Sets.
+  var scanSetFilter = "all";
   var view = "scan";
   var filterGame = "all";
   var searchTerm = "";
@@ -1425,8 +1432,8 @@
     }
     console.log("[CNN] Lade Modell + Metadaten ...");
     var t0 = performance.now();
-    var modelUrl = "./riftbound-model-v3.onnx";
-    var metaUrl  = "./riftbound-model-meta-v3.json";
+    var modelUrl = "./riftbound-model-v4.onnx";
+    var metaUrl  = "./riftbound-model-meta-v4.json";
     cnnLoading = Promise.all([
       ort.InferenceSession.create(modelUrl, {
         executionProviders: ["wasm"],   // WASM überall verfügbar, WebGL fallback
@@ -1488,6 +1495,28 @@
     return probs;
   }
 
+  // idx (Modell-Ausgabe) -> Karten-Objekt aus riftcodexCache, plus Set-Liste.
+  // Wird einmal gebaut sobald Modell UND Kartendaten geladen sind, dann gecacht.
+  var cnnIdxCard = null;   // Array: cnnIdxCard[idx] = card | null
+  var cnnSetList = null;   // [{ id, label, count }] nach Kartenzahl sortiert
+  function buildCnnCardIndex() {
+    if (cnnIdxCard) return cnnIdxCard;
+    if (!cnnMeta || !riftcodexCache) return null;
+    var byId = {};
+    for (var i = 0; i < riftcodexCache.length; i++) byId[riftcodexCache[i].riftcodexId] = riftcodexCache[i];
+    cnnIdxCard = cnnMeta.cardIds.map(function (id) { return byId[id] || null; });
+    var setMap = {};
+    for (var j = 0; j < cnnIdxCard.length; j++) {
+      var c = cnnIdxCard[j];
+      if (!c || !c.setId) continue;
+      if (!setMap[c.setId]) setMap[c.setId] = { id: c.setId, label: c.set || c.setId, count: 0 };
+      setMap[c.setId].count++;
+    }
+    cnnSetList = Object.keys(setMap).map(function (k) { return setMap[k]; })
+      .sort(function (a, b) { return b.count - a.count; });
+    return cnnIdxCard;
+  }
+
   // Klassifiziert ein Canvas. Liefert { top3, bestProb, secondProb, margin, time }
   function classifyWithCnn(canvas) {
     if (!cnnSession || !cnnMeta) return Promise.reject(new Error("CNN nicht geladen"));
@@ -1504,31 +1533,43 @@
       for (var i = 0; i < probs.length; i++) indices[i] = i;
       var sortedIdx = Array.from(indices).sort(function(a, b) { return probs[b] - probs[a]; });
 
-      // WICHTIG: Riftcodex hat mehrere Einträge mit gleichem Karten-Namen
-      // (z.B. Serrated Dirk als Common + Promo + Alt-Art). Alle zeigen dasselbe
-      // Bild, also SUMMIEREN wir die Wahrscheinlichkeiten pro Karten-NAME.
-      // Damit ist "Serrated Dirk 50% + Serrated Dirk 5%" ein 55%-Match, nicht
-      // ein 50%-Match mit 5%-Konkurrenz.
-      var byName = {}; // name -> { totalProb, firstIdx (mit höchster prob) }
+      // Karten-Index (idx -> Karte) bauen, für Set-Filter + Gruppierung.
+      var idxCard = buildCnnCardIndex();
+      var applySetFilter = (scanSetFilter && scanSetFilter !== "all" && !!idxCard);
+
+      // WICHTIG: Dieselbe Karte existiert in den Riftcodex-Daten mehrfach —
+      // als echtes DB-Duplikat (gleiche riftbound_id doppelt), als Set-übergreifender
+      // Nachdruck und als Metal-Variante. Alle zeigen dasselbe Bild, das CNN kann
+      // sie nicht unterscheiden. Deshalb SUMMIEREN wir die Wahrscheinlichkeiten pro
+      // riftbound_id (Nummer) — das fasst die echten Duplikate zusammen. Fällt eine
+      // Nummer, gruppieren wir ersatzweise nach Name.
+      // Zusätzlich: ist ein Set gewählt, fliegen alle Karten anderer Sets raus ->
+      // Nachdrucke/Metal aus Fremd-Sets kollidieren dann gar nicht erst.
+      var byKey = {};
       for (var k = 0; k < sortedIdx.length; k++) {
         var idx = sortedIdx[k];
-        var name = cnnMeta.cardNames[idx];
-        if (!byName[name]) {
-          byName[name] = { totalProb: 0, firstIdx: idx, indices: [] };
+        var card = idxCard ? idxCard[idx] : null;
+        if (applySetFilter && (!card || card.setId !== scanSetFilter)) continue;
+        var key = (card && card.number) ? ("rb:" + card.number) : ("nm:" + cnnMeta.cardNames[idx]);
+        if (!byKey[key]) {
+          byKey[key] = { totalProb: 0, firstIdx: idx, indices: [], name: cnnMeta.cardNames[idx] };
         }
-        byName[name].totalProb += probs[idx];
-        byName[name].indices.push(idx);
+        byKey[key].totalProb += probs[idx];
+        byKey[key].indices.push(idx);
       }
-      // Sortiere Namen nach totalProb absteigend
-      var nameGroups = Object.keys(byName).map(function(name) {
-        return { name: name, totalProb: byName[name].totalProb,
-                 firstIdx: byName[name].firstIdx, indices: byName[name].indices };
+      // Sortiere Gruppen nach totalProb absteigend
+      var nameGroups = Object.keys(byKey).map(function(key) {
+        return { name: byKey[key].name, totalProb: byKey[key].totalProb,
+                 firstIdx: byKey[key].firstIdx, indices: byKey[key].indices };
       }).sort(function(a, b) { return b.totalProb - a.totalProb; });
 
       // Top-3 nach GRUPPIERTEM totalProb
       var top3 = nameGroups.slice(0, 3).map(function(g) {
-        var cardId = cnnMeta.cardIds[g.firstIdx];
-        var card = (riftcodexCache || []).filter(function(c) { return c.riftcodexId === cardId; })[0];
+        var card = idxCard ? idxCard[g.firstIdx] : null;
+        if (!card) {
+          var cardId = cnnMeta.cardIds[g.firstIdx];
+          card = (riftcodexCache || []).filter(function(c) { return c.riftcodexId === cardId; })[0];
+        }
         return {
           card: card,
           idx: g.firstIdx,
@@ -1899,10 +1940,18 @@
     try {
       apiKey = localStorage.getItem(STORAGE_KEY_APIKEY) || "";
     } catch (e) {}
+    try {
+      var sf = localStorage.getItem(STORAGE_KEY_SETFILTER);
+      if (sf) scanSetFilter = sf;
+    } catch (e) {}
   }
 
   function saveSpecialFilters() {
     try { localStorage.setItem(STORAGE_KEY_SPECIALFILTERS, JSON.stringify(specialFilters)); } catch (e) {}
+  }
+
+  function saveSetFilter() {
+    try { localStorage.setItem(STORAGE_KEY_SETFILTER, scanSetFilter); } catch (e) {}
   }
 
   function saveCards() {
@@ -3759,7 +3808,14 @@
     document.getElementById("tab-scan").onclick = function () { switchView("scan"); };
     document.getElementById("tab-collection").onclick = function () { switchView("collection"); };
 
-    // Zusammenfassung im Zahnrad-Knopf: aktiver Modus + aktive Filter
+    // Label für das aktuell gewählte Set (oder null bei "Alle Sets")
+    function currentSetLabel() {
+      if (!scanSetFilter || scanSetFilter === "all") return null;
+      var found = (cnnSetList || []).filter(function (s) { return s.id === scanSetFilter; })[0];
+      return found ? found.label : scanSetFilter;
+    }
+
+    // Zusammenfassung im Zahnrad-Knopf: aktives Set + Modus + aktive Filter
     function updateScanSettingsSummary() {
       var el = document.getElementById("scan-settings-summary");
       if (!el) return;
@@ -3769,8 +3825,42 @@
       if (specialFilters.overnumber) active.push("Overnumber");
       if (specialFilters.altArt) active.push("Alt Art");
       if (specialFilters.promo) active.push("Promo");
-      el.textContent = active.length ? modeLabel + " · " + active.join(", ") : modeLabel;
+      var parts = [];
+      var setL = currentSetLabel();
+      if (setL) parts.push(setL);
+      parts.push(active.length ? modeLabel + " · " + active.join(", ") : modeLabel);
+      el.textContent = parts.join(" · ");
     }
+
+    // Set-Wähler-Buttons dynamisch aus der Set-Liste des Modells aufbauen.
+    // Wird aufgerufen sobald Modell+Kartendaten geladen sind und beim Öffnen.
+    function renderSetFilterRow() {
+      var row = document.getElementById("set-filter-row");
+      if (!row) return;
+      buildCnnCardIndex(); // füllt cnnSetList falls möglich
+      var sets = cnnSetList || [];
+      // Gewähltes Set nicht mehr vorhanden? -> zurück auf "all"
+      if (scanSetFilter !== "all" && !sets.some(function (s) { return s.id === scanSetFilter; })) {
+        scanSetFilter = "all";
+      }
+      var html = '<button type="button" class="mode-btn focus-ring' +
+                 (scanSetFilter === "all" ? " active" : "") + '" data-set="all">Alle Sets</button>';
+      sets.forEach(function (s) {
+        html += '<button type="button" class="mode-btn focus-ring' +
+                (scanSetFilter === s.id ? " active" : "") + '" data-set="' + escapeHtml(s.id) + '">' +
+                escapeHtml(s.label) + '</button>';
+      });
+      row.innerHTML = html;
+      row.querySelectorAll("[data-set]").forEach(function (btn) {
+        btn.onclick = function () {
+          scanSetFilter = btn.getAttribute("data-set");
+          saveSetFilter();
+          row.querySelectorAll("[data-set]").forEach(function (b) { b.classList.toggle("active", b === btn); });
+          updateScanSettingsSummary();
+        };
+      });
+    }
+    window.__renderSetFilterRow = renderSetFilterRow; // vom Setup-Callback aufrufbar
 
     document.querySelectorAll("#foil-mode-row [data-mode]").forEach(function (btn) {
       btn.onclick = function () {
@@ -3793,6 +3883,11 @@
         updateScanSettingsSummary();
       };
     });
+    // Foil-Modus-Buttons auf den geladenen Wert synchronisieren
+    document.querySelectorAll("#foil-mode-row [data-mode]").forEach(function (b) {
+      b.classList.toggle("active", b.getAttribute("data-mode") === foilMode);
+    });
+    renderSetFilterRow();
     updateScanSettingsSummary();
 
     document.getElementById("settings-btn").onclick = function () {
@@ -3823,6 +3918,8 @@
         hideEmbedBuildBanner();
         console.log("[Setup] CNN-Bilderkennung bereit:", res.meta.cardIds.length, "Karten");
         updateEngineStatus();
+        // Set-Wähler jetzt befüllen (Modell + Kartendaten sind bereit)
+        if (window.__renderSetFilterRow) window.__renderSetFilterRow();
       }).catch(function(err) {
         hideEmbedBuildBanner();
         console.warn("[Setup] CNN nicht verfügbar → nur OCR-Pfad nutzbar:", err.message);
@@ -3855,7 +3952,7 @@
 
     // --- Scan-Einstellungen (Modal-Overlay, funktioniert auch im Vollbild) ---
     var scanSettingsOverlay = document.getElementById("scan-settings-overlay");
-    function openScanSettings() { scanSettingsOverlay.classList.remove("hidden"); }
+    function openScanSettings() { renderSetFilterRow(); scanSettingsOverlay.classList.remove("hidden"); }
     function closeScanSettings() { scanSettingsOverlay.classList.add("hidden"); }
     document.getElementById("scan-settings-toggle").onclick = openScanSettings;
     // Kamera-Zahnrad öffnet dasselbe Modal — OHNE Vollbild zu verlassen

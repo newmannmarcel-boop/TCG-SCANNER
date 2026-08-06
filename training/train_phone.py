@@ -10,7 +10,7 @@ Neu ggue. resume_train.py:
       val_clean  = auf sauberen Studio-Bildern (wie bisher, Vergleichbarkeit)
       val_phone  = auf handy-augmentierten Bildern (der EIGENTLICHE Zielwert)
   - Best-Model wird nach val_phone ausgewaehlt (nicht val_clean)
-  - Checkpoint alle 5 Epochs
+  - Resumable Checkpoint nach jeder Epoch (Modell+Optimizer+Scheduler)
 """
 import os, json, time, random
 from pathlib import Path
@@ -20,12 +20,32 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms.v2 as T
-from torchvision.models import mobilenet_v3_small
+from torchvision.models import mobilenet_v3_large
 from PIL import Image
 import requests
 from tqdm import tqdm
 
 import phone_aug
+
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    _GPU_HANDLE = pynvml.nvmlDeviceGetHandleByIndex(0)
+except Exception:
+    _GPU_HANDLE = None
+
+TARGET_POWER_W = 320  # Prozess-Drosselung: haelt NUR das Training zurueck,
+                       # nicht die GPU als Ganzes (siehe throttle_gpu_power)
+
+
+def throttle_gpu_power():
+    """Bremst den Trainings-Takt nur, falls die GPU ueber TARGET_POWER_W zieht.
+    Bei TARGET_POWER_W nahe dem Hardware-Maximum greift das praktisch nie ->
+    Training laeuft mit voller Geschwindigkeit."""
+    if _GPU_HANDLE is None:
+        return
+    while pynvml.nvmlDeviceGetPowerUsage(_GPU_HANDLE) / 1000.0 > TARGET_POWER_W:
+        time.sleep(0.05)
 
 SCRIPT_DIR = Path(__file__).parent
 CACHE_DIR = SCRIPT_DIR / "card_cache"
@@ -34,15 +54,31 @@ API_BASE = "https://api.riftcodex.com"
 
 IMAGE_SIZE = 224
 BATCH_SIZE = 64
-NUM_EPOCHS = 45
+NUM_EPOCHS = 30
 LEARNING_RATE = 2.5e-4
 WEIGHT_DECAY = 1e-4
-REPEATS_PER_EPOCH = 25
-CHECKPOINT_EVERY = 5
+REPEATS_PER_EPOCH = 40
+CHECKPOINT_EVERY = 1
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BEST_PATH = OUTPUT_DIR / "best_model.pth"
 LAST_PATH = OUTPUT_DIR / "last_checkpoint.pth"
+
+
+def fetch_json_with_retry(url, attempts=6):
+    """Riftcodex-API ist gelegentlich kurz nicht erreichbar (Timeout/Reset).
+    Retry mit steigender Wartezeit, statt den ganzen Lauf abbrechen zu lassen."""
+    for i in range(attempts):
+        try:
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            if i == attempts - 1:
+                raise
+            wait = min(2 ** i, 30)
+            print(f"  Netzwerkfehler ({e}), retry in {wait}s ...")
+            time.sleep(wait)
 
 
 def fetch_card_list():
@@ -50,7 +86,7 @@ def fetch_card_list():
     cards = []
     page = 1
     while True:
-        r = requests.get(f"{API_BASE}/cards?size=100&page={page}", timeout=30).json()
+        r = fetch_json_with_retry(f"{API_BASE}/cards?size=100&page={page}")
         items = r.get("items", [])
         if not items:
             break
@@ -69,11 +105,20 @@ def ensure_images(cards):
     for card in tqdm(cards, desc="Check"):
         p = CACHE_DIR / f"{card['id']}.png"
         if not p.exists():
-            try:
-                r = requests.get(card["media"]["image_url"], timeout=30)
-                Image.open(BytesIO(r.content)).convert("RGB").save(p)
-            except Exception as e:
-                print(f"  Skip {card.get('name','?')}: {e}")
+            ok = False
+            for attempt in range(4):
+                try:
+                    r = requests.get(card["media"]["image_url"], timeout=30)
+                    r.raise_for_status()
+                    Image.open(BytesIO(r.content)).convert("RGB").save(p)
+                    ok = True
+                    break
+                except Exception as e:
+                    if attempt == 3:
+                        print(f"  Skip {card.get('name','?')}: {e}")
+                    else:
+                        time.sleep(min(2 ** attempt, 15))
+            if not ok:
                 continue
         paths.append((card["id"], card.get("name", "?"), p))
     return paths
@@ -102,7 +147,7 @@ def load_model(num_classes):
     print(f"[3/5] Modell aus {BEST_PATH.name} laden ...")
     ck = torch.load(BEST_PATH, map_location=DEVICE, weights_only=True)
     print(f"  saved val_acc={ck['val_acc']*100:.2f}%")
-    m = mobilenet_v3_small(weights=None)
+    m = mobilenet_v3_large(weights=None)
     inf = m.classifier[-1].in_features
     m.classifier[-1] = nn.Linear(inf, num_classes)
     m.load_state_dict(ck["model_state"])
@@ -127,20 +172,34 @@ def train(model, train_loader, clean_loader, phone_loader, num_classes):
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=NUM_EPOCHS)
     crit = nn.CrossEntropyLoss(label_smoothing=0.05)
     best_phone = 0.0
+    start_ep = 0
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    for ep in range(NUM_EPOCHS):
+    if LAST_PATH.exists():
+        ck = torch.load(LAST_PATH, map_location=DEVICE, weights_only=True)
+        if ck.get("num_classes") == num_classes and "optimizer_state" in ck:
+            model.load_state_dict(ck["model_state"])
+            opt.load_state_dict(ck["optimizer_state"])
+            sched.load_state_dict(ck["scheduler_state"])
+            start_ep = ck["epoch"] + 1
+            best_phone = ck["best_phone"]
+            print(f"  -> Unterbrochener Lauf gefunden, Fortsetzung ab Epoch {start_ep+1}")
+        else:
+            print(f"  -> Resume-Checkpoint passt nicht, starte neu.")
+
+    for ep in range(start_ep, NUM_EPOCHS):
         model.train()
         t0 = time.time()
         loss_sum = corr = tot = 0
         pbar = tqdm(train_loader, desc=f"Epoch {ep+1}/{NUM_EPOCHS}", leave=False)
-        for imgs, labels in pbar:
+        for step, (imgs, labels) in enumerate(pbar):
             imgs, labels = imgs.to(DEVICE, non_blocking=True), labels.to(DEVICE, non_blocking=True)
             opt.zero_grad()
             out = model(imgs)
             loss = crit(out, labels)
             loss.backward()
             opt.step()
+            throttle_gpu_power()
             loss_sum += loss.item() * imgs.size(0)
             corr += (out.argmax(1) == labels).sum().item()
             tot += imgs.size(0)
@@ -150,6 +209,9 @@ def train(model, train_loader, clean_loader, phone_loader, num_classes):
         val_clean = evaluate(model, clean_loader)
         val_phone = evaluate(model, phone_loader)
         sched.step()
+        # Gibt von PyTorch zwischengespeicherten (aber ungenutzten) VRAM an
+        # Windows zurueck -> Browser/Video-Decoder haben wieder Speicher frei.
+        torch.cuda.empty_cache()
         dt = time.time() - t0
 
         mark = ""
@@ -159,22 +221,29 @@ def train(model, train_loader, clean_loader, phone_loader, num_classes):
                         "num_classes": num_classes, "val_acc": val_clean,
                         "val_phone": val_phone}, BEST_PATH)
             mark = " <- neuer best (phone)"
+        # Resumable Checkpoint NACH JEDER Epoch -> bei Absturz/Stromausfall
+        # geht hoechstens die laufende Epoch verloren, nicht der ganze Lauf.
         if (ep + 1) % CHECKPOINT_EVERY == 0:
             torch.save({"model_state": model.state_dict(),
+                        "optimizer_state": opt.state_dict(),
+                        "scheduler_state": sched.state_dict(),
+                        "epoch": ep,
                         "num_classes": num_classes, "val_acc": val_clean,
-                        "val_phone": val_phone}, LAST_PATH)
+                        "val_phone": val_phone, "best_phone": best_phone}, LAST_PATH)
 
         print(f"Epoch {ep+1:>2}/{NUM_EPOCHS}  loss={loss_sum/max(1,tot):.3f}  "
               f"train_acc={train_acc*100:.1f}%  val_clean={val_clean*100:.1f}%  "
               f"val_phone={val_phone*100:.1f}%  lr={sched.get_last_lr()[0]:.2e}  ({dt:.0f}s){mark}")
 
+    if LAST_PATH.exists():
+        LAST_PATH.unlink()
     print(f"-> Best val_phone: {best_phone*100:.2f}%")
 
 
 def export(num_classes, entries):
     print("[5/5] ONNX exportieren ...")
     ck = torch.load(BEST_PATH, map_location=DEVICE, weights_only=True)
-    m = mobilenet_v3_small(weights=None)
+    m = mobilenet_v3_large(weights=None)
     inf = m.classifier[-1].in_features
     m.classifier[-1] = nn.Linear(inf, num_classes)
     m.load_state_dict(ck["model_state"])
@@ -186,7 +255,7 @@ def export(num_classes, entries):
                       dynamic_axes={"input": {0: "batch"}, "logits": {0: "batch"}},
                       opset_version=14)
     print(f"  -> {onnx_path} ({onnx_path.stat().st_size/1024/1024:.1f} MB)")
-    meta = {"version": 1, "model": "mobilenet_v3_small_phone_finetune",
+    meta = {"version": 1, "model": "mobilenet_v3_large_phone_finetune",
             "input_size": IMAGE_SIZE, "num_classes": num_classes,
             "val_acc": ck.get("val_acc"), "val_phone": ck.get("val_phone"),
             "preprocess": {"mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]},

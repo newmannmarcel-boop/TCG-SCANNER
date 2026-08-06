@@ -6,6 +6,7 @@ build-tools/package-lock.json
 training/card_cache/
 training/output/
 training/__pycache__/
+training/archive/
 
 # OS / Editor Müll
 .DS_Store

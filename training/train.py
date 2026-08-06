@@ -26,16 +26,37 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms.v2 as T
-from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
+from torchvision.models import mobilenet_v3_large, MobileNet_V3_Large_Weights
 from PIL import Image, ImageFilter
 import requests
 from tqdm import tqdm
+
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    _GPU_HANDLE = pynvml.nvmlDeviceGetHandleByIndex(0)
+except Exception:
+    _GPU_HANDLE = None
+
+TARGET_POWER_W = 320  # Prozess-Drosselung: haelt NUR das Training zurueck,
+                       # nicht die GPU als Ganzes (siehe throttle_gpu_power)
+
+
+def throttle_gpu_power():
+    """Bremst den Trainings-Takt nur, falls die GPU ueber TARGET_POWER_W zieht.
+    Bei TARGET_POWER_W nahe dem Hardware-Maximum greift das praktisch nie ->
+    Training laeuft mit voller Geschwindigkeit."""
+    if _GPU_HANDLE is None:
+        return
+    while pynvml.nvmlDeviceGetPowerUsage(_GPU_HANDLE) / 1000.0 > TARGET_POWER_W:
+        time.sleep(0.05)
 
 # ===== KONFIG =====
 SCRIPT_DIR = Path(__file__).parent
 CACHE_DIR = SCRIPT_DIR / "card_cache"
 OUTPUT_DIR = SCRIPT_DIR / "output"
 API_BASE = "https://api.riftcodex.com"
+RESUME_PATH = OUTPUT_DIR / "stage1_resume.pth"
 
 IMAGE_SIZE = 224
 BATCH_SIZE = 64
@@ -49,15 +70,29 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ===== 1) KARTEN-DATEN LADEN =====
 
+def fetch_json_with_retry(url, attempts=6):
+    """Riftcodex-API ist gelegentlich kurz nicht erreichbar (Timeout/Reset).
+    Retry mit steigender Wartezeit, statt den ganzen Lauf abbrechen zu lassen."""
+    for i in range(attempts):
+        try:
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            if i == attempts - 1:
+                raise
+            wait = min(2 ** i, 30)
+            print(f"  Netzwerkfehler ({e}), retry in {wait}s ...")
+            time.sleep(wait)
+
+
 def fetch_card_list():
     """Holt alle Karten von Riftcodex API (paginiert)."""
     print("[1/5] Karten-Liste laden ...")
     cards = []
     page = 1
     while True:
-        resp = requests.get(f"{API_BASE}/cards?size=100&page={page}", timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
+        data = fetch_json_with_retry(f"{API_BASE}/cards?size=100&page={page}")
         items = data.get("items", [])
         if not items:
             break
@@ -79,15 +114,23 @@ def download_card_images(cards):
     for i, card in enumerate(tqdm(cards, desc="Download")):
         cache_path = CACHE_DIR / f"{card['id']}.png"
         if not cache_path.exists():
-            try:
-                url = card["media"]["image_url"]
-                r = requests.get(url, timeout=30)
-                r.raise_for_status()
-                # Konvertiere zu RGB-PNG (für Konsistenz)
-                img = Image.open(BytesIO(r.content)).convert("RGB")
-                img.save(cache_path)
-            except Exception as e:
-                print(f"  Skip {card.get('name','?')}: {e}")
+            ok = False
+            for attempt in range(4):
+                try:
+                    url = card["media"]["image_url"]
+                    r = requests.get(url, timeout=30)
+                    r.raise_for_status()
+                    # Konvertiere zu RGB-PNG (für Konsistenz)
+                    img = Image.open(BytesIO(r.content)).convert("RGB")
+                    img.save(cache_path)
+                    ok = True
+                    break
+                except Exception as e:
+                    if attempt == 3:
+                        print(f"  Skip {card.get('name','?')}: {e}")
+                    else:
+                        time.sleep(min(2 ** attempt, 15))
+            if not ok:
                 skipped_idx.append(i)
                 continue
         paths.append((card["id"], card.get("name", "?"), cache_path))
@@ -181,8 +224,8 @@ class RepeatedCardDataset(Dataset):
 # ===== 3) MODELL =====
 
 def build_model(num_classes):
-    print(f"[3/5] MobileNetV3-Small aufsetzen, {num_classes} Klassen ...")
-    model = mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.IMAGENET1K_V1)
+    print(f"[3/5] MobileNetV3-Large aufsetzen, {num_classes} Klassen ...")
+    model = mobilenet_v3_large(weights=MobileNet_V3_Large_Weights.IMAGENET1K_V1)
     # Final classifier durch unsere Anzahl Klassen ersetzen
     in_feats = model.classifier[-1].in_features
     model.classifier[-1] = nn.Linear(in_feats, num_classes)
@@ -198,10 +241,23 @@ def train_model(model, train_loader, val_loader, num_classes):
     criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
 
     best_val_acc = 0.0
+    start_epoch = 0
     best_path = OUTPUT_DIR / "best_model.pth"
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    for epoch in range(NUM_EPOCHS):
+    if RESUME_PATH.exists():
+        ck = torch.load(RESUME_PATH, map_location=DEVICE, weights_only=True)
+        if ck.get("num_classes") == num_classes:
+            model.load_state_dict(ck["model_state"])
+            optimizer.load_state_dict(ck["optimizer_state"])
+            scheduler.load_state_dict(ck["scheduler_state"])
+            start_epoch = ck["epoch"] + 1
+            best_val_acc = ck["best_val_acc"]
+            print(f"  -> Unterbrochener Lauf gefunden, Fortsetzung ab Epoch {start_epoch+1}")
+        else:
+            print(f"  -> Resume-Checkpoint passt nicht ({ck.get('num_classes')} vs {num_classes} Klassen), starte neu.")
+
+    for epoch in range(start_epoch, NUM_EPOCHS):
         # ----- TRAIN -----
         model.train()
         t0 = time.time()
@@ -209,13 +265,14 @@ def train_model(model, train_loader, val_loader, num_classes):
         train_correct = 0
         train_total = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{NUM_EPOCHS} train", leave=False)
-        for imgs, labels in pbar:
+        for step, (imgs, labels) in enumerate(pbar):
             imgs, labels = imgs.to(DEVICE, non_blocking=True), labels.to(DEVICE, non_blocking=True)
             optimizer.zero_grad()
             logits = model(imgs)
             loss = criterion(logits, labels)
             loss.backward()
             optimizer.step()
+            throttle_gpu_power()
             train_loss_sum += loss.item() * imgs.size(0)
             preds = logits.argmax(dim=1)
             train_correct += (preds == labels).sum().item()
@@ -239,6 +296,9 @@ def train_model(model, train_loader, val_loader, num_classes):
         val_acc = val_correct / max(1, val_total)
 
         scheduler.step()
+        # Gibt von PyTorch zwischengespeicherten (aber ungenutzten) VRAM an
+        # Windows zurueck -> Browser/Video-Decoder haben wieder Speicher frei.
+        torch.cuda.empty_cache()
         dt = time.time() - t0
 
         marker = ""
@@ -249,10 +309,21 @@ def train_model(model, train_loader, val_loader, num_classes):
                         "val_acc": val_acc}, best_path)
             marker = " ← neuer best"
 
+        # Resumable Checkpoint NACH JEDER Epoch -> bei Absturz/Stromausfall
+        # geht hoechstens die laufende Epoch verloren, nicht der ganze Lauf.
+        torch.save({"model_state": model.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "scheduler_state": scheduler.state_dict(),
+                    "epoch": epoch,
+                    "num_classes": num_classes,
+                    "best_val_acc": best_val_acc}, RESUME_PATH)
+
         print(f"Epoch {epoch+1:>2}/{NUM_EPOCHS}  train_loss={train_loss:.3f}  "
               f"train_acc={train_acc*100:.1f}%  val_acc={val_acc*100:.1f}%  "
               f"lr={scheduler.get_last_lr()[0]:.2e}  ({dt:.1f}s){marker}")
 
+    if RESUME_PATH.exists():
+        RESUME_PATH.unlink()
     print(f"-> Best Val-Acc: {best_val_acc*100:.2f}%, Modell: {best_path}")
     return best_path
 
@@ -262,7 +333,7 @@ def train_model(model, train_loader, val_loader, num_classes):
 def export_onnx(checkpoint_path, card_paths):
     print("[5/5] ONNX exportieren ...")
     ckpt = torch.load(checkpoint_path, map_location=DEVICE, weights_only=True)
-    model = mobilenet_v3_small(weights=None)
+    model = mobilenet_v3_large(weights=None)
     in_feats = model.classifier[-1].in_features
     model.classifier[-1] = nn.Linear(in_feats, ckpt["num_classes"])
     model.load_state_dict(ckpt["model_state"])
@@ -283,7 +354,7 @@ def export_onnx(checkpoint_path, card_paths):
     meta_path = OUTPUT_DIR / "riftbound-model-meta.json"
     meta = {
         "version": 1,
-        "model": "mobilenet_v3_small_finetune",
+        "model": "mobilenet_v3_large_finetune",
         "input_size": IMAGE_SIZE,
         "num_classes": ckpt["num_classes"],
         "val_acc": ckpt["val_acc"],
@@ -315,11 +386,11 @@ def main():
     train_tfm, val_tfm = build_transforms()
     base_train_ds = CardDataset(card_paths, transform=train_tfm)
     val_ds = CardDataset(card_paths, transform=val_tfm)
-    # Über-Sampling per Epoch: 20× durch jede Karte mit randomized augmentation
-    # → 1064 × 20 = ~21k Samples/Epoch, bei 40 Epochs ~850k augmentierte Bilder
-    train_ds = RepeatedCardDataset(base_train_ds, n_repeats=20)
+    # Über-Sampling per Epoch: 32× durch jede Karte mit randomized augmentation
+    # → 1451 × 32 = ~46k Samples/Epoch, bei 40 Epochs ~1.86 Mio. augmentierte Bilder
+    train_ds = RepeatedCardDataset(base_train_ds, n_repeats=32)
 
-    # 12 Worker für 20-Core-CPU + hoher prefetch_factor → GPU bleibt füttert
+    # 12 Worker für 20-Core-CPU + hoher prefetch_factor → GPU bleibt gefüttert
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
                               num_workers=12, pin_memory=True, persistent_workers=True,
                               prefetch_factor=4)
