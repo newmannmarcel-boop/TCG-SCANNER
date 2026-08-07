@@ -1616,6 +1616,18 @@
       return (riftcodexCache || []).filter(function(c) { return c.riftcodexId === id; })[0];
     }).filter(function(c) { return !!c; });
     if (candidates.length === 0) candidates = [card];
+    // Echte Duplikate zusammenfassen: mehrere DB-Einträge mit gleicher
+    // riftbound_id (Nummer) sind DIESELBE Karte (Riftcodex-Datenfehler, z.B.
+    // "Lightning Rush" ven-156-166 doppelt) -> nur EINEN Kandidaten behalten,
+    // sonst zeigt die Auswahl 2x die identische Karte. Karten mit anderer
+    // Nummer (echte Varianten wie Promo/Alt-Art) bleiben getrennt.
+    var seenNum = {};
+    candidates = candidates.filter(function(c) {
+      var key = c.number || c.riftcodexId;
+      if (seenNum[key]) return false;
+      seenNum[key] = true;
+      return true;
+    });
 
     var label = (card.set || "?") + " · " + (card.name || card.number || "?") +
                 (candidates.length > 1 ? " (" + candidates.length + " Varianten)" : "");
@@ -2568,6 +2580,19 @@
             : Promise.resolve([]);
 
       return candidatesPromise.then(function (candidates) {
+        // Echte Duplikate zusammenfassen: mehrere DB-Einträge mit gleicher
+        // riftbound_id (Nummer) sind DIESELBE Karte (Riftcodex-Datenfehler) ->
+        // nur einen Kandidaten behalten, sonst erscheint 2x die identische Karte.
+        // Gilt für ALLE Pfade (CNN + OCR + Nummer-Suche).
+        var _seenKey = {};
+        candidates = (candidates || []).filter(function (c) {
+          if (!c) return false;
+          var key = c.number || c.riftcodexId;
+          if (!key) return true;
+          if (_seenKey[key]) return false;
+          _seenKey[key] = true;
+          return true;
+        });
         var entry = queue.filter(function (e) { return e.id === entryId; })[0];
         if (entry) {
           // Basis-Felder setzen (werden ggf. unten überschrieben)
