@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- deploy: v4-Modell (1451 Karten) + Set-Auswahl + Duplikat-Dedup -->
+<!-- deploy: v5 Small-Modell (11.5MB, 1451 Karten, handy-tauglich) + Set-Auswahl + Duplikat-Dedup -->
 <html lang="de">
 <head>
 <meta charset="UTF-8">
@@ -1433,8 +1433,8 @@
     }
     console.log("[CNN] Lade Modell + Metadaten ...");
     var t0 = performance.now();
-    var modelUrl = "./riftbound-model-v4.onnx";
-    var metaUrl  = "./riftbound-model-meta-v4.json";
+    var modelUrl = "./riftbound-model-v5.onnx";
+    var metaUrl  = "./riftbound-model-meta-v5.json";
     cnnLoading = Promise.all([
       ort.InferenceSession.create(modelUrl, {
         executionProviders: ["wasm"],   // WASM überall verfügbar, WebGL fallback
